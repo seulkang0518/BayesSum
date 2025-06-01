@@ -5,20 +5,20 @@ from itertools import product
 from scipy.stats import t
 
 def J_matrix(L):
-    n = L * L  # total number of spins
+    n = L * L  
     J = np.zeros((n, n), dtype=int)
     
     def index(r, c):
-        return r * L + c  # flatten 2D (row, col) to 1D index
+        return r * L + c  
     
     for r in range(L):
         for c in range(L):
             i = index(r, c)
-            # Right neighbor
+    
             if c + 1 < L:
                 j = index(r, c + 1)
                 J[i, j] = J[j, i] = 1
-            # Down neighbor
+          
             if r + 1 < L:
                 j = index(r + 1, c)
                 J[i, j] = J[j, i] = 1
