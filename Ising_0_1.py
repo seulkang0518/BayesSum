@@ -5,12 +5,12 @@ from itertools import product
 from scipy.stats import t
 
 def J_matrix(L):
-    n = L * L  # total number of spins
+    n = L * L  # total number of spins same as d
     J = np.zeros((n, n), dtype=int)
     
     def index(r, c):
-        return r * L + c  # flatten 2D (row, col) to 1D index
-    
+        return r * L + c  
+
     for r in range(L):
         for c in range(L):
             i = index(r, c)
@@ -25,28 +25,28 @@ def J_matrix(L):
                 
     return J
 
-def f(X, J, d, beta):
-    num_edges = np.sum(J) // 2
-    expected_avg = num_edges * 0.25  # mean under uniform
-    max_dev = (3/4) * num_edges
-
-    result = []
-    for x in X:
-        H_raw = x @ J @ x
-        H_centered = H_raw - expected_avg
-        H_scaled = (H_centered / max_dev) * num_edges
-        result.append(np.exp(beta * H_scaled))
-    
-    return np.array(result)
-
 # def f(X, J, d, beta):
-#     return np.array([np.exp(beta * (x @ J @ x)) for x in X])
+#     num_edges = np.sum(J) // 2
+#     expected_avg = num_edges * 0.25  # under uniform, H(x) is 1 with a probability of 0.25
+#     max_dev = (3/4) * num_edges # maximum deviation
+
+#     result = []
+#     for x in X:
+#         H_raw = x @ J @ x
+#         H_centered = H_raw - expected_avg
+#         H_scaled = (H_centered / max_dev) * num_edges
+#         result.append(np.exp(beta * H_scaled))
+    
+#     return np.array(result)
+
+def f(X, J, d, beta):
+    return np.array([np.exp(beta * (x @ J @ x)) for x in X])
 
 def kernel_embedding(lambda_, d):
 	return ((1 + np.exp(-lambda_))*0.5)**d
 
 def double_integral(lambda_, d):
-	return ((1 + np.exp(-lambda_))*0.5)**d
+	return (1 + np.exp(-lambda_)*0.5)**d
 
 def gram_matrix(X, lambda_, d):
 
@@ -54,19 +54,20 @@ def gram_matrix(X, lambda_, d):
     K = np.zeros((n_samples, n_samples))
 
     for i in range(n_samples):
-        for j in range(n_samples):
+        for j in range(i, n_samples):
             hamming_distance = np.sum(X[i] != X[j])
-            K[i, j] = np.exp(-lambda_ * hamming_distance)
-    
+            value = np.exp(-lambda_ * hamming_distance)
+            K[i, j] = value
+            K[j, i] = value
+        
     return K
-
 
 
 def bayesian_cubature(X, f_vals, lambda_, d):
     n = len(X)
     K = gram_matrix(X, lambda_, d)
     z_scalar = kernel_embedding(lambda_, d)
-    z = np.full((n, 1), z_scalar)  # expand to (n, 1)
+    z = np.full((n, 1), z_scalar)  
     f_vals = f_vals.reshape(n, 1)
     K += 1e-8 * np.eye(n)  # regularization
     K_inv = np.linalg.inv(K)
@@ -92,6 +93,8 @@ def run_experiment(f, n_vals, lambda_, d, L, seed=0):
 
     for n in n_vals:
         X = generate_unique_X(n, d)
+        # X = np.random.choice([0, 1], size=(n, d))
+        # X = np.unique(X, axis=0)
         f_vals = f(X, J, d, beta)
 
         mu_bmc, var_bmc = bayesian_cubature(X, f_vals, lambda_, d)
@@ -128,7 +131,6 @@ L = 3
 
 # Run and plot
 n_vals = np.arange(5, 500, 20)
-# n_vals = [300, 500, 520]
 results = run_experiment(f, n_vals, lambda_, d, L)
 
 plt.figure(figsize=(10, 6))

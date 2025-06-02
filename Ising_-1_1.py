@@ -28,13 +28,12 @@ def J_matrix(L):
 def f(X, J, d, beta):
     return np.array([np.exp(beta * (x @ J @ x)) for x in X])
 
-
 def kernel_embedding(lambda_, d):
     embedding = np.exp(-lambda_ * d / 2) * (np.cosh(lambda_ / 2) ** d)
     return embedding
 
 def double_integral(lambda_, d):
-    double_sum = np.exp(-lambda_ * d / 2) * ((4 * np.cosh(lambda_ / 2)) ** d)
+    double_sum = np.exp(-lambda_ * d / 2) * (np.cosh(lambda_ / 2) ** d)
     return double_sum
 
 def gram_matrix(X, lambda_, d):
@@ -45,7 +44,9 @@ def gram_matrix(X, lambda_, d):
     for i in range(n_samples):
         for j in range(n_samples):
             inner_product = np.sum(X[i]*X[j])
-            K[i, j] = np.exp(-lambda_ * 0.5 * (d - inner_product))
+            value = np.exp(-lambda_ * 0.5 * (d - inner_product))
+            K[i, j] = value
+            K[j, i] = value
     
     return K
 
@@ -74,16 +75,17 @@ def bayesian_cubature(X, f_vals, lambda_, d):
 def run_experiment(f, n_vals, lambda_, d, L, seed=0):
     np.random.seed(seed)
     all_states = np.array(list(product([-1, 1], repeat=d)))
-    true_expectation = np.mean(f(all_states, J_matrix(L), d, beta))
+    J = J_matrix(L)
+    true_expectation = np.mean(f(all_states, J, d, beta))
 
     bmc_means, bmc_lows, bmc_highs = [], [], []
     mc_means, mc_stds = [], []
 
     for n in n_vals:
+        X = generate_unique_X(n, d)
         # X = np.random.choice([-1, 1], size=(n, d))
         # X = np.unique(X, axis=0)
-        X = generate_unique_X(n, d)
-        f_vals = f(X, J_matrix(L), d, beta)
+        f_vals = f(X, J, d, beta)
 
         mu_bmc, var_bmc = bayesian_cubature(X, f_vals, lambda_, d)
         df = len(X)
