@@ -37,29 +37,11 @@ def double_integral(lambda_, d):
     double_sum = np.exp(-lambda_ * d / 2) * (np.cosh(lambda_ / 2) ** d)
     return double_sum
 
-# def kernel_embedding(lambda_, d):
-#     return ((1 + np.exp(-lambda_))*0.5)**d
-
-# def double_integral(lambda_, d):
-#     return ((1 + np.exp(-lambda_))*0.5)**d
-
 def gram_matrix(X, lambda_, d):
     X_rescaled = 2 * X - 1.  # Rescale {0, 1} to {-1, 1}
     inner_products = X_rescaled @ X_rescaled.T  # shape (n_samples, n_samples)
     K = np.exp(-lambda_ * 0.5 * (d - inner_products))
     return K
-
-# def gram_matrix(X, lambda_, d):
-
-#     n_samples = X.shape[0]
-#     K = np.zeros((n_samples, n_samples))
-
-#     for i in range(n_samples):
-#         for j in range(n_samples):
-#             hamming_distance = np.sum(X[i] != X[j])
-#             K[i, j] = np.exp(-lambda_ * hamming_distance)
-    
-#     return K
 
 def bayesian_cubature(X, f_vals, lambda_, d):
     n = len(X)
@@ -91,7 +73,7 @@ def run_experiment(f, n_vals, lambda_, d, L, seed):
 
     for n in n_vals:
         unique_X = generate_unique_X(n, d, seed)
-        X = np.random.choice([0, 1], size=(n, d))
+        X = np.random.choice([0., 1.], size=(n, d))
         # X = np.unique(X, axis=0)
         f_vals = f(X, J, d, beta)
         f_unqiue_vals = f(unique_X, J, d, beta)
@@ -157,29 +139,6 @@ def run_multiple_seeds(f, n_vals, lambda_, d, L, seeds):
 
 
 def plot_results(n_vals, results, save_path="results"):
-    # os.makedirs(save_path, exist_ok=True)
-
-    # bmc_means = np.clip(results["bmc_means"], 1e-10, None)
-    # bmc_lows = np.clip(results["bmc_lows"], 1e-10, None)
-    # bmc_highs = np.clip(results["bmc_highs"], 1e-10, None)
-    # mc_means = np.clip(results["mc_means"], 1e-10, None)
-    # true_val = max(results["true_val"], 1e-10)
-
-    # plt.figure(figsize=(10, 6))
-    # plt.plot(n_vals, mc_means, 'ko', label="MC")
-    # plt.plot(n_vals, bmc_means, 'ro', label="BQ")
-    # plt.fill_between(n_vals, bmc_lows, bmc_highs, color='red', alpha=0.2)
-    # plt.axhline(true_val, color='green', linestyle='--', label="True")
-
-    # plt.title("Bayesian Quadrature vs Monte Carlo - 4x4 lattice")
-    # plt.xlabel("n (number of points)")
-    # plt.ylabel("Estimated Expectation (log scale)")
-    # plt.yscale('log')
-    # plt.legend()
-    # plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(save_path, "ising_0_1 (5,100,5) kernel.png"), dpi=300)
-    # plt.close()
 
     os.makedirs(save_path, exist_ok=True)
 
