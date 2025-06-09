@@ -1,8 +1,9 @@
-##2D
 import numpy as np
 import matplotlib.pyplot as plt
 from itertools import product
 from scipy.stats import t
+import os
+import time
 
 def J_matrix(L):
     n = L * L  # total number of spins same as d
@@ -23,45 +24,42 @@ def J_matrix(L):
                 j = index(r + 1, c)
                 J[i, j] = J[j, i] = 1
                 
-    return J
-
-# def f(X, J, d, beta):
-#     num_edges = np.sum(J) // 2
-#     expected_avg = num_edges * 0.25  # under uniform, H(x) is 1 with a probability of 0.25
-#     max_dev = (3/4) * num_edges # maximum deviation
-
-#     result = []
-#     for x in X:
-#         H_raw = x @ J @ x
-#         H_centered = H_raw - expected_avg
-#         H_scaled = (H_centered / max_dev) * num_edges
-#         result.append(np.exp(beta * H_scaled))
-    
-#     return np.array(result)
+    return 0.1 * J 
 
 def f(X, J, d, beta):
-    return np.array([np.exp(beta * (x @ J @ x)) for x in X])
+    return np.array([np.exp(-beta * (x @ J @ x)) for x in X])
 
 def kernel_embedding(lambda_, d):
-	return ((1 + np.exp(-lambda_))*0.5)**d
+    embedding = np.exp(-lambda_ * d / 2) * (np.cosh(lambda_ / 2) ** d)
+    return embedding
 
 def double_integral(lambda_, d):
-	return (1 + np.exp(-lambda_)*0.5)**d
+    double_sum = np.exp(-lambda_ * d / 2) * (np.cosh(lambda_ / 2) ** d)
+    return double_sum
+
+# def kernel_embedding(lambda_, d):
+#     return ((1 + np.exp(-lambda_))*0.5)**d
+
+# def double_integral(lambda_, d):
+#     return ((1 + np.exp(-lambda_))*0.5)**d
 
 def gram_matrix(X, lambda_, d):
-
-    n_samples = X.shape[0]
-    K = np.zeros((n_samples, n_samples))
-
-    for i in range(n_samples):
-        for j in range(i, n_samples):
-            hamming_distance = np.sum(X[i] != X[j])
-            value = np.exp(-lambda_ * hamming_distance)
-            K[i, j] = value
-            K[j, i] = value
-        
+    X_rescaled = 2 * X - 1.  # Rescale {0, 1} to {-1, 1}
+    inner_products = X_rescaled @ X_rescaled.T  # shape (n_samples, n_samples)
+    K = np.exp(-lambda_ * 0.5 * (d - inner_products))
     return K
 
+# def gram_matrix(X, lambda_, d):
+
+#     n_samples = X.shape[0]
+#     K = np.zeros((n_samples, n_samples))
+
+#     for i in range(n_samples):
+#         for j in range(n_samples):
+#             hamming_distance = np.sum(X[i] != X[j])
+#             K[i, j] = np.exp(-lambda_ * hamming_distance)
+    
+#     return K
 
 def bayesian_cubature(X, f_vals, lambda_, d):
     n = len(X)
@@ -76,37 +74,39 @@ def bayesian_cubature(X, f_vals, lambda_, d):
     var = PiPi_k - (z.T @ K_inv @ z).item()
     return mean, var
 
-def generate_unique_X(n, d, seed=0):
+def generate_unique_X(n, d, seed):
     np.random.seed(seed)
-    all_states = np.array(list(product([0, 1], repeat=d)))
+    all_states = np.array(list(product([0., 1.], repeat=d)))
     indices = np.random.choice(len(all_states), size=n, replace=False)
     return all_states[indices]
 
-def run_experiment(f, n_vals, lambda_, d, L, seed=0):
+def run_experiment(f, n_vals, lambda_, d, L, seed):
     np.random.seed(seed)
     J = J_matrix(L) 
-    all_states = np.array(list(product([0, 1], repeat=d)))
+    all_states = np.array(list(product([0., 1.], repeat=d)))
     true_expectation = np.mean(f(all_states, J, d, beta))
 
     bmc_means, bmc_lows, bmc_highs = [], [], []
     mc_means, mc_stds = [], []
 
     for n in n_vals:
-        X = generate_unique_X(n, d)
-        # X = np.random.choice([0, 1], size=(n, d))
+        unique_X = generate_unique_X(n, d, seed)
+        X = np.random.choice([0, 1], size=(n, d))
         # X = np.unique(X, axis=0)
         f_vals = f(X, J, d, beta)
+        f_unqiue_vals = f(unique_X, J, d, beta)
 
-        mu_bmc, var_bmc = bayesian_cubature(X, f_vals, lambda_, d)
-        df = len(X)
+        mu_bmc, var_bmc = bayesian_cubature(unique_X, f_unqiue_vals, lambda_, d)
+        df = len(unique_X)
         scale = np.sqrt(max(var_bmc, 0))
         ci_low, ci_high = t.interval(0.95, df=df, loc=mu_bmc, scale=scale)
         bmc_means.append(mu_bmc)
         bmc_lows.append(ci_low)
         bmc_highs.append(ci_high)
-
+        print(f"n={n}, BMC err={np.abs(mu_bmc-true_expectation):.4f}")
         mu_mc = np.mean(f_vals)
         std_mc = np.std(f_vals) / np.sqrt(len(X))
+        print(f"n={n}, MC err={np.abs(mu_mc-true_expectation):.4f}")
         mc_means.append(mu_mc)
         mc_stds.append(std_mc)
 
@@ -120,40 +120,106 @@ def run_experiment(f, n_vals, lambda_, d, L, seed=0):
         "mc_stds": np.array(mc_stds)
     }
 
+def run_multiple_seeds(f, n_vals, lambda_, d, L, seeds):
+    bmc_means_all = []
+    bmc_lows_all = []
+    bmc_highs_all = []
+    mc_means_all = []
+    mc_stds_all = []
+
+    for seed in range(seeds):
+        result = run_experiment(f, n_vals, lambda_, d, L, seed)
+        
+        bmc_means_all.append(result["bmc_means"])
+        bmc_lows_all.append(result["bmc_lows"])
+        bmc_highs_all.append(result["bmc_highs"])
+        mc_means_all.append(result["mc_means"])
+        mc_stds_all.append(result["mc_stds"])
+
+    # Average over seeds
+    bmc_means_avg = np.mean(bmc_means_all, axis=0)
+    bmc_lows_avg = np.mean(bmc_lows_all, axis=0)
+    bmc_highs_avg = np.mean(bmc_highs_all, axis=0)
+    mc_means_avg = np.mean(mc_means_all, axis=0)
+    mc_stds_avg = np.mean(mc_stds_all, axis=0)
+    
+    # All seeds use the same true expectation
+    true_val = result["true_val"]
+
+    return {
+        "true_val": true_val,
+        "bmc_means": bmc_means_avg,
+        "bmc_lows": bmc_lows_avg,
+        "bmc_highs": bmc_highs_avg,
+        "mc_means": mc_means_avg,
+        "mc_stds": mc_stds_avg
+    }
 
 
-k_b = 1
-T_c = 2.269
-beta = 1 / (k_b * T_c)
-lambda_ = 3
-d = 9
-L = 3
+def plot_results(n_vals, results, save_path="results"):
+    # os.makedirs(save_path, exist_ok=True)
 
-# Run and plot
-n_vals = np.arange(5, 500, 20)
-results = run_experiment(f, n_vals, lambda_, d, L)
+    # bmc_means = np.clip(results["bmc_means"], 1e-10, None)
+    # bmc_lows = np.clip(results["bmc_lows"], 1e-10, None)
+    # bmc_highs = np.clip(results["bmc_highs"], 1e-10, None)
+    # mc_means = np.clip(results["mc_means"], 1e-10, None)
+    # true_val = max(results["true_val"], 1e-10)
 
-plt.figure(figsize=(10, 6))
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(n_vals, mc_means, 'ko', label="MC")
+    # plt.plot(n_vals, bmc_means, 'ro', label="BQ")
+    # plt.fill_between(n_vals, bmc_lows, bmc_highs, color='red', alpha=0.2)
+    # plt.axhline(true_val, color='green', linestyle='--', label="True")
 
-# Clip values to avoid log-scale issues
-bmc_means = np.clip(results["bmc_means"], 1e-10, None)
-bmc_lows = np.clip(results["bmc_lows"], 1e-10, None)
-bmc_highs = np.clip(results["bmc_highs"], 1e-10, None)
-mc_means = np.clip(results["mc_means"], 1e-10, None)
-true_val = max(results["true_val"], 1e-10)
+    # plt.title("Bayesian Quadrature vs Monte Carlo - 4x4 lattice")
+    # plt.xlabel("n (number of points)")
+    # plt.ylabel("Estimated Expectation (log scale)")
+    # plt.yscale('log')
+    # plt.legend()
+    # plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(save_path, "ising_0_1 (5,100,5) kernel.png"), dpi=300)
+    # plt.close()
 
-plt.plot(n_vals, mc_means, 'ko', label="MC")
-plt.plot(n_vals, bmc_means, 'ro', label="BQ")
-plt.fill_between(n_vals, bmc_lows, bmc_highs, color='red', alpha=0.2)
-plt.axhline(true_val, color='green', linestyle='--', label="True")
+    os.makedirs(save_path, exist_ok=True)
 
-# plt.xscale('log')  # optional: also log on x-axis
-plt.yscale('log')
+    true_val = results["true_val"]
+    bmc_errors = np.abs(results["bmc_means"] - true_val)
+    mc_errors = np.abs(results["mc_means"] - true_val)
 
-plt.title("Bayesian Quadrature vs Monte Carlo - 3x3 lattice, {0,1} domain")
-plt.xlabel("n (number of points)")
-plt.ylabel("Estimated Expectation (log scale)")
-plt.legend()
-plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-plt.tight_layout()
-plt.show()
+    # Clip to avoid log(0)
+    bmc_errors = np.clip(bmc_errors, 1e-10, None)
+    mc_errors = np.clip(mc_errors, 1e-10, None)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(n_vals, mc_errors, 'ko-', label="MC Absolute Error")
+    plt.plot(n_vals, bmc_errors, 'ro-', label="BQ Absolute Error")
+
+    plt.title("Absolute Error: Bayesian Quadrature vs Monte Carlo\n(Pointwise Comparison kernel, modified Ising model input)")
+    plt.xlabel("n (number of points)")
+    plt.ylabel("Absolute Error (log scale)")
+    plt.yscale('log')
+    plt.legend()
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, "abs_error_ising_0_1.png"), dpi=300)
+    plt.close()
+
+def main():
+    global beta  # so it's accessible in f()
+    k_b = 1
+    T_c = 2.269
+    beta = 1 / (k_b * T_c)
+    lambda_val = 0.1
+    L = 4
+    d = L * L
+    # n_vals = np.arange(5, 100, 5)
+    n_vals = np.array([10, 50, 100, 200])
+    seeds = 10
+
+    # seed = int(time.time() % 1000)
+    results = run_multiple_seeds(f, n_vals, lambda_val, d, L, seeds)
+    plot_results(n_vals, results, save_path="results")
+
+if __name__ == "__main__":
+    main()
