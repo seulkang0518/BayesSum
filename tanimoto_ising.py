@@ -64,7 +64,7 @@ def double_integral(d):
                 denominator = s + t - a
                 if denominator == 0:
                     continue  # avoid division by zero
-                term = (a / denominator) * comb(t, a) * comb(d - t, s - a)
+                term = (a / denominator) * comb(t, a) * comb(d - t, s - a) * comb(d, t)
                 double_integral += term
 
     return double_integral / (2 ** (2 * d))
@@ -202,10 +202,11 @@ def main():
     k_b = 1
     T_c = 2.269
     beta = 1 / (k_b * T_c)
+    # beta = 1
     L = 4
     d = L * L
 
-    n_vals = np.array([10, 50, 100, 200, 300])
+    n_vals = np.array([10, 50, 100, 200, 300, 500])
 
     seeds = 10
     results = run_multiple_seeds(f, n_vals, d, L, seeds)
