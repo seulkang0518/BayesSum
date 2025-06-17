@@ -46,6 +46,7 @@ def gram_matrix(X, lambda_, d):
 def bayesian_cubature(X, f_vals, lambda_, d):
     n = len(X)
     K = gram_matrix(X, lambda_, d)
+    column_mean = np.mean(K[:, 0])
     z_scalar = kernel_embedding(lambda_, d)
     z = np.full((n, 1), z_scalar)  
     f_vals = f_vals.reshape(n, 1)
@@ -62,7 +63,63 @@ def generate_unique_X(n, d, seed):
     indices = np.random.choice(len(all_states), size=n, replace=False)
     return all_states[indices]
 
-def run_experiment(f, n_vals, lambda_, d, L, seed):
+
+########### Bayesian Optimisation ###########
+
+def kernel_vec(x, X, lambda_, d):
+    x_rescaled = 2 * x - 1
+    X_rescaled = 2 * X - 1
+    inner_products = X_rescaled @ x_rescaled
+    return np.exp(-lambda_ * 0.5 * (d - inner_products)).reshape(-1, 1)
+
+def compute_kg(X_obs, y_obs, candidates, lambda_, d, num_mc):
+    K = gram_matrix(X_obs, lambda_, d) + 1e-8 * np.eye(len(X_obs))
+    K_inv = np.linalg.inv(K)
+
+    def mu(x):
+        return kernel_vec(x, X_obs, lambda_, d).T @ K_inv @ y_obs
+
+    def sigma2(x):
+        z = kernel_vec(x, X_obs, lambda_, d)
+        return 1. - z.T @ K_inv @ z
+
+
+    curr_best = max(mu(x).item() for x in candidates) ## calculating current best
+    
+    kg_values = [] 
+
+    for x in candidates: ## looping over each candidate point in our finite discrete domain
+
+        mu_n = mu(x).item() ## for each x, we can calculate mu and sigma so that we can sample y from the normal distribution
+        sigma = np.sqrt(max(sigma2(x).item(), 1e-10))
+
+        increments = []
+
+        for _ in range(num_mc):
+            y_sample = np.random.normal(mu_n, sigma) ## sample y from the normal distribution => (x,y_j)
+
+            ### now with new data point (x, y_j), we update GP posterior
+            X_aug = np.vstack([X_obs, x])
+            y_aug = np.vstack([y_obs, [[y_sample]]])
+            K_aug = gram_matrix(X_aug, lambda_, d) + 1e-8 * np.eye(len(X_aug))
+            K_inv_aug = np.linalg.inv(K_aug)
+
+            def mu_1(xq):
+                return kernel_vec(xq, X_aug, lambda_, d).T @ K_inv_aug @ y_aug
+
+            ## calculating max(mu_n+1) - mu_n
+            increment = max(mu_1(xq).item() for xq in candidates) - curr_best
+            increments.append(increment)
+
+        kg_values.append(np.mean(increments)) ## np.mean(increments) is the MC approximation of E(max(mu_n+1)) - max(mu_n)
+
+        ## now kg_values would have the MC approximation of KG at each x
+    return candidates[np.argmax(kg_values)]
+
+
+###############################################
+
+def run_experiment(f, n_vals, lambda_, d, L, seed, use_bo, num_mc):
     np.random.seed(seed)
     J = J_matrix(L) 
     all_states = np.array(list(product([0., 1.], repeat=d)))
@@ -72,14 +129,32 @@ def run_experiment(f, n_vals, lambda_, d, L, seed):
     mc_means, mc_stds = [], []
 
     for n in n_vals:
-        unique_X = generate_unique_X(n, d, seed)
-        X = np.random.choice([0., 1.], size=(n, d))
-        # X = np.unique(X, axis=0)
-        f_vals = f(X, J, d, beta)
-        f_unqiue_vals = f(unique_X, J, d, beta)
 
-        mu_bmc, var_bmc = bayesian_cubature(unique_X, f_unqiue_vals, lambda_, d)
-        df = len(unique_X)
+        if use_bo:
+
+            X, y = [], []
+            candidates = np.array(list(product([0., 1.], repeat=d)))
+            np.random.shuffle(candidates)
+            x0 = candidates[0] ## select one point - random due to shuffle
+            X.append(x0)
+            y.append(f(np.array([x0]), J, d, beta)[0]) # evaluate y at that x
+
+            for _ in range(1, n):
+                x_next = compute_kg(np.array(X), np.array(y).reshape(-1, 1), candidates, lambda_, d, num_mc) ## choose the bext next x point to evalulate
+                y_next = f(np.array([x_next]), J, d, beta)[0] ## evaluate at x
+                X.append(x_next)
+                y.append(y_next)
+
+            X = np.array(X)
+            f_vals = np.array(y)
+
+        else:
+
+            X = generate_unique_X(n, d, seed)
+            f_vals = f(unique_X, J, d, beta)
+
+        mu_bmc, var_bmc = bayesian_cubature(X, f_vals, lambda_, d)
+        df = len(X)
         scale = np.sqrt(max(var_bmc, 0))
         ci_low, ci_high = t.interval(0.95, df=df, loc=mu_bmc, scale=scale)
         bmc_means.append(mu_bmc)
@@ -172,13 +247,20 @@ def main():
     lambda_val = 0.1
     L = 4
     d = L * L
-    # n_vals = np.arange(5, 100, 5)
-    n_vals = np.array([10, 50, 100, 200])
-    seeds = 10
 
+    n_vals = np.array([10, 20, 50])
+    # seeds = 0
+    seed = 0
+    use_bo = True
+    num_mc = 10
+
+    result = run_experiment(f, n_vals, lambda_val, d, L, seed, use_bo, num_mc)
+    print("Results with Bayesian Optimization (KG):")
+    print("BMC means:", result["bmc_means"])
+    print("True expectation:", result["true_val"])
     # seed = int(time.time() % 1000)
-    results = run_multiple_seeds(f, n_vals, lambda_val, d, L, seeds)
-    plot_results(n_vals, results, save_path="results")
+    # results = run_multiple_seeds(f, n_vals, lambda_val, d, L, seeds)
+    # plot_results(n_vals, results, save_path="results")
 
 if __name__ == "__main__":
     main()
