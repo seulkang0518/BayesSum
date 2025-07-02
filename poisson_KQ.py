@@ -48,7 +48,6 @@ def double_integral_poisson(lambda_, xmax=200):
 @partial(jit, static_argnames=["xmax"])
 def compute_integral_variance(X, lambda_, xmax):
 
-    xmax = int(xmax)  
     K = brownian_kernel(X, X) + 1e-4 * jnp.eye(len(X))
     L, lower = cho_factor(K)
     z = kernel_embedding_poisson(lambda_, X, xmax).reshape(-1, 1)
@@ -56,50 +55,16 @@ def compute_integral_variance(X, lambda_, xmax):
 
     return double_integral_poisson(lambda_, xmax) - (z.T @ K_inv_z)[0, 0]
 
-def kernel_vec(x, X):
-    return jnp.minimum(x, X).reshape(-1, 1)
+@partial(jit, static_argnames=["xmax"])
+def compute_max_variance(X_obs, candidates, lambda_, xmax):
+    current_var = compute_integral_variance(X_obs, lambda_, xmax)
 
-def compute_kg_poisson(X_obs, y_obs, candidates, lambda_, num_samples, xmax, rng_key):
-    xmax = int(xmax) if isinstance(xmax, (int, float)) else int(jax.device_get(xmax))
-    K = brownian_kernel(X_obs, X_obs) + 1e-4 * jnp.eye(len(X_obs))
-    try:
-        L, lower = cho_factor(K)
-    except:
-        raise ValueError("Cholesky decomposition failed. Kernel matrix might be singular.")
+    def updated_var(x):
+        X_aug = jnp.concatenate([X_obs, jnp.array([x])])
+        return compute_integral_variance(X_aug, lambda_, xmax)
 
-    z = v_kernel_embedding_poisson(lambda_, X_obs, xmax).reshape(-1, 1)
-    K_inv_y = cho_solve((L, lower), y_obs.reshape(-1, 1))
-    K_inv_z = cho_solve((L, lower), z)
-    PiPi_k = double_integral_poisson(lambda_, xmax)
-    current_var = PiPi_k - (z.T @ K_inv_z)[0, 0]
-
-    def mu_sigma(x):
-        kx = kernel_vec(x, X_obs)
-        mu_x = (kx.T @ K_inv_y)[0, 0]
-        sigma2_x = 1.0 - (kx.T @ cho_solve((L, lower), kx))[0, 0]
-        return mu_x, jnp.sqrt(jnp.maximum(sigma2_x, 1e-10))
-
-    def kg_for_candidate(x, subkey):
-        mu_x, sigma_x = mu_sigma(x)
-        f_samples = mu_x + sigma_x * random.normal(subkey, (num_samples,))
-
-        def updated_var(f_j):
-            X_aug = jnp.append(X_obs, x)
-            f_aug = jnp.append(y_obs, f_j)
-            K_aug = brownian_kernel(X_aug, X_aug) + 1e-4 * jnp.eye(len(X_aug))
-            try:
-                L_aug, lower_aug = cho_factor(K_aug)
-                z_aug = v_kernel_embedding_poisson(lambda_, X_aug, xmax).reshape(-1, 1)
-                K_inv_z_aug = cho_solve((L_aug, lower_aug), z_aug)
-                return PiPi_k - (z_aug.T @ K_inv_z_aug)[0, 0]
-            except:
-                return current_var
-
-        updated_vars = vmap(updated_var)(f_samples)
-        return current_var - jnp.mean(updated_vars)
-
-    subkeys = random.split(rng_key, len(candidates))
-    kg_vals = vmap(kg_for_candidate)(candidates, subkeys)
+    updated_vars = vmap(updated_var)(candidates)
+    kg_vals = current_var - updated_vars
     return candidates[jnp.argmax(kg_vals)]
 
 
@@ -107,10 +72,7 @@ def bayesian_cubature_poisson(X, f_vals, lambda_, xmax):
     # xmax = int(xmax) if isinstance(xmax, (int, float)) else int(jax.device_get(xmax))
     n = len(X)
     K = brownian_kernel(X, X) + 1e-4 * jnp.eye(n)
-    try:
-        L, lower = cho_factor(K)
-    except:
-        raise ValueError("Cholesky failed: kernel matrix not positive definite.")
+    L, lower = cho_factor(K)
 
     z = kernel_embedding_poisson(lambda_, X, xmax).reshape(n, 1)
     f_vals = f_vals.reshape(n, 1)
@@ -122,32 +84,20 @@ def bayesian_cubature_poisson(X, f_vals, lambda_, xmax):
     var = double_integral_poisson(lambda_, xmax) - (z.T @ K_inv_z)[0, 0]
     return mean, var
 
-@partial(jit, static_argnames=["xmax"])
-def compute_max_variance(X_obs, candidates, lambda_, xmax):
-    current_var = compute_integral_variance(X_obs, lambda_, xmax)
-
-    def updated_var(x):
-        X_aug = jnp.append(X_obs, x)
-        return compute_integral_variance(X_aug, lambda_, xmax)
-
-    updated_vars = vmap(updated_var)(candidates)
-    kg_vals = current_var - updated_vars
-    return candidates[jnp.argmax(kg_vals)]
-
-def run_experiment(f, n_vals, lambda_, xmax, seed, use_bo):
-    rng = random.PRNGKey(seed)
+def run_experiment(f, n_vals, lambda_, xmax, seed, run_mc=True, run_bmc=True):
+    key = jax.random.PRNGKey(seed)
     candidates = jnp.arange(0, xmax + 1)
     true_val = jnp.sum(f(candidates) * jax_poisson.pmf(candidates, mu=lambda_))
-
     bmc_means, mc_means, times = [], [], []
 
     for n in n_vals:
         start = time.time()
 
-        if use_bo:
-            key, subkey = random.split(rng)
-            idx = random.choice(subkey, len(candidates))
-            x0 = candidates[idx]
+        if run_bmc:
+            ## Deterministic BQ: fix x0 as the mode of Poisson(lambda)
+            pmf = jax_poisson.pmf(candidates, mu=lambda_)
+            x0 = candidates[jnp.argmax(pmf)]
+
             X = [x0]
             y = [f(x0)]
 
@@ -163,31 +113,31 @@ def run_experiment(f, n_vals, lambda_, xmax, seed, use_bo):
                 X.append(x_next)
                 y.append(y_next)
 
-            X_bmc = jnp.array(X)
-            f_vals_bmc = jnp.array(y)
+            X_bmc, f_vals_bmc = jnp.array(X), jnp.array(y)
+            mu_bmc, _ = bayesian_cubature_poisson(X_bmc, f_vals_bmc, lambda_, xmax)
+            jax.block_until_ready(mu_bmc)
+            bmc_means.append(mu_bmc)
 
         else:
-            key, subkey = random.split(rng)
-            X_bmc = random.poisson(subkey, lam=lambda_, shape=(n,))
-            f_vals_bmc = f(X_bmc)
+            bmc_means.append(jnp.nan)
 
-        mu_bmc, _ = bayesian_cubature_poisson(X_bmc, f_vals_bmc, lambda_, xmax)
-
-        key, subkey = random.split(rng)
-        X_mc = random.poisson(subkey, lam=lambda_, shape=(n,))
-        f_vals_mc = f(X_mc)
-        mu_mc = jnp.mean(f_vals_mc)
-
-        jax.block_until_ready(mu_bmc)
-        jax.block_until_ready(mu_mc)
+        if run_mc:
+            key, subkey = random.split(key)
+            X_mc = jax.random.poisson(subkey, lam=lambda_, shape=(n, 1))
+            f_vals_mc = f(X_mc)
+            mu_mc = jnp.mean(f_vals_mc)
+            jax.block_until_ready(mu_mc)
+            mc_means.append(mu_mc)
+        else:
+            mc_means.append(jnp.nan)
 
         elapsed = time.time() - start
         times.append(elapsed)
-        bmc_means.append(mu_bmc)
-        mc_means.append(mu_mc)
 
-        print(f"n={n}, Time={elapsed:.3f}s, BMC err={jnp.abs(mu_bmc - true_val):.10f}")
-        print(f"n={n}, MC  err={jnp.abs(mu_mc - true_val):.10f}")
+        if run_bmc:
+            print(f"n={n}, Time={elapsed:.3f}s, BMC err={float(jnp.abs(mu_bmc - true_val)):.10f}")
+        if run_mc:
+            print(f"n={n}, MC   err={float(jnp.abs(mu_mc - true_val)):.10f}")
 
     return {
         "true_val": true_val,
@@ -197,32 +147,42 @@ def run_experiment(f, n_vals, lambda_, xmax, seed, use_bo):
     }
 
 
-def run_multiple_seeds(f, n_vals, lambda_, xmax, num_seeds, use_bo):
+def run_multiple_seeds(f, n_vals, lambda_, xmax, num_seeds):
     bmc_all = []
     mc_all = []
     times_all = []
 
     for seed in range(num_seeds):
         print(f"\n--- Seed {seed} ---")
-        result = run_experiment(f, n_vals, lambda_, xmax, seed, use_bo)
-        bmc_all.append(result["bmc_means"])
+        run_bmc = (seed == 0)
+        run_mc = True
+
+        result = run_experiment(
+            f, n_vals, lambda_, xmax, seed,
+             run_mc=run_mc, run_bmc=run_bmc)
+
+        if run_bmc:
+            bmc_all.append(result["bmc_means"])
+            times_all.append(result["times"])
+
         mc_all.append(result["mc_means"])
-        times_all.append(result["times"])
 
-    bmc_all = jnp.stack(bmc_all)  
     mc_all = jnp.stack(mc_all)
-    times_all = jnp.stack(times_all)
+    mc_abs_error = jnp.mean(jnp.abs(mc_all - result["true_val"]), axis=0)
 
-    # Compute mean of absolute errors (per seed, then averaged)
-    true_val = result["true_val"]
-    bmc_abs_error = jnp.mean(jnp.abs(bmc_all - true_val), axis=0)
-    mc_abs_error = jnp.mean(jnp.abs(mc_all - true_val), axis=0)
+    if bmc_all:
+        bmc_all = jnp.stack(bmc_all)
+        bmc_abs_error = jnp.abs(bmc_all[0] - result["true_val"])
+        avg_time = jnp.array(times_all[0])
+    else:
+        bmc_abs_error = None
+        avg_time = None
 
     return {
-        "true_val": true_val,
+        "true_val": result["true_val"],
         "bmc_mean_error": bmc_abs_error,
         "mc_mean_error": mc_abs_error,
-        "times_mean": jnp.mean(times_all, axis=0)
+        "times_mean": avg_time
     }
 
 def plot_results(n_vals, results, lambda_val, save_path="results"):
@@ -254,11 +214,9 @@ def main():
     xmax = 200
     n_vals = jnp.array([10, 20, 40, 60])
     seed = 0
-    use_bo = True
-    num_mc = 10
     num_seeds = 10
 
-    results = run_multiple_seeds(f, n_vals, lambda_val, xmax, num_seeds, use_bo)
+    results = run_multiple_seeds(f, n_vals, lambda_val, xmax, num_seeds)
 
 
     print("\n=== Final Averaged Results ===")
