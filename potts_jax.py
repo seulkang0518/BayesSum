@@ -96,12 +96,6 @@ def all_states_cached(d):
     states = jnp.array(list(product([0., 1., 2.], repeat=d)), dtype=jnp.float32)
     return states
 
-def true_expectation(L, d, beta):
-    J = J_matrix(L)
-    all_states = all_states_cached(d)
-    mean_val = batched_true_expectation(J, beta, all_states)
-    return mean_val, all_states
-
 def make_f_batch_fn(J, beta):
     return lambda xs: f_batch(xs, J, beta)
 
@@ -124,29 +118,30 @@ def true_expectation(L, d, beta):
 
 def run_experiment(f_single, n_vals, lambda_, d, L, seed, beta, t_e, all_states, use_bo=True):
     J = J_matrix(L)
-
+    key = jax.random.PRNGKey(seed)
     bmc_means, mc_means, times = [], [], []
+
     for n in n_vals:
-        key = jax.random.PRNGKey(seed + n)
+        start = time.time()
+
         if use_bo:
-
-            start = time.time()
-
-            idx = jax.random.choice(key, len(all_states), shape=())
-            x0 = all_states[idx]
+            candidates = all_states
+            key, subkey = jax.random.split(key)
+            x0 = candidates[jax.random.choice(subkey, len(candidates))]
             X = [x0]
             y = [f_single(x0, J, beta)]
+
             for _ in range(1, n):
-                X_arr = jnp.stack(X)
-                y_arr = jnp.array(y)
-                x_next = compute_max_variance(X_arr, y_arr.reshape(-1, 1), all_states, lambda_, d)
+                x_next = compute_max_variance(jnp.array(X), jnp.array(y).reshape(-1, 1), candidates, lambda_, d)
                 y_next = f_single(x_next, J, beta)
                 X.append(x_next)
                 y.append(y_next)
-            X_bmc = jnp.stack(X)
-            f_vals_bmc = jnp.array(y)
+
+            X_bmc, f_vals_bmc = jnp.array(X), jnp.array(y)
         else:
-            X_bmc = generate_unique_X(n, d, seed + n)
+            key, subkey = jax.random.split(key)
+            idxs = jax.random.choice(subkey, len(all_states), shape=(n,), replace=False)
+            X_bmc = all_states[idxs]
             f_vals_bmc = f_batch(X_bmc, J, beta)
 
         # MC
@@ -156,13 +151,13 @@ def run_experiment(f_single, n_vals, lambda_, d, L, seed, beta, t_e, all_states,
         f_vals_mc = f_batch(X_mc, J, beta)
         mu_mc = jnp.mean(f_vals_mc)
 
+        # Bayesian quadrature
         mu_bmc, _ = bayesian_cubature(X_bmc, f_vals_bmc, lambda_, d)
 
-        # Ensure all relevant computation is completed before timing ends
         jax.block_until_ready(mu_bmc)
         jax.block_until_ready(mu_mc)
-
         elapsed = time.time() - start
+
         times.append(elapsed)
         bmc_means.append(mu_bmc)
         mc_means.append(mu_mc)
