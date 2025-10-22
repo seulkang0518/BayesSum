@@ -1,0 +1,17 @@
+# macOS cruft
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Results & figures
+results/
+meeting/
+*.png
+*.pdf
+*.npz
+*.npy
+
+# Misc local env
+.python-version
