@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import time
 from functools import lru_cache
 from jax.scipy.stats import norm
-import matplotlib.pyplot as plt
-
+import os
+import matplotlib as mpl
 
 @partial(jit, static_argnums=0)
 def J_matrix(L):
@@ -116,141 +116,116 @@ def true_expectation(L, d, beta):
     mean_val = batched_true_expectation(J, beta, all_states)
     return mean_val, all_states
 
-def run_experiment(f_single, n_vals, lambda_, d, L, seed, beta, t_e, all_states, run_mc=True, run_bmc=True):
+def sample_states(key, d, num_samples):
+    return jax.random.randint(key, shape=(num_samples, d), minval=0, maxval=3).astype(jnp.float32)
+
+def run_experiment(f_single, n_vals, lambda_, d, L, seed, beta, t_e, all_states, run_mc, run_bmc, sub_sample):
     J = J_matrix(L)
     key = jax.random.PRNGKey(seed)
-    bmc_means, mc_means, times = [], [], []
+    bmc_means, bmc_sam_means = [], []
 
     for n in n_vals:
         start = time.time()
 
-        if run_bmc:
-            candidates = all_states
+        #### no subsampling
+        candidates = all_states
+        key, subkey = jax.random.split(key)
+        x0 = candidates[jax.random.choice(subkey, len(candidates))]
+        X = [x0]
+        y = [f_single(x0, J, beta)]
+
+        for _ in range(1, n):
+            x_next = compute_max_variance(jnp.array(X), jnp.array(y).reshape(-1, 1), candidates, lambda_, d)
+            y_next = f_single(x_next, J, beta)
+            X.append(x_next)
+            y.append(y_next)
+
+        X_bmc, f_vals_bmc = jnp.array(X), jnp.array(y)
+        mu_bmc, _ = bayesian_cubature(X_bmc, f_vals_bmc, lambda_, d)
+        jax.block_until_ready(mu_bmc)
+        bmc_means.append(mu_bmc)
+
+        #### subsampling
+        X = jnp.zeros((n, d))
+        y = jnp.zeros((n,))
+
+        key, subkey = jax.random.split(key)
+        x0 = sample_states(subkey, d, 1)[0]
+        X = X.at[0].set(x0)
+        y = y.at[0].set(f_single(x0, J, beta))
+
+        for i in range(1, n):
             key, subkey = jax.random.split(key)
-            x0 = candidates[jax.random.choice(subkey, len(candidates))]
-            X = [x0]
-            y = [f_single(x0, J, beta)]
+            candidates = sample_states(subkey, d, sub_sample or 1000)
 
-            for _ in range(1, n):
-                x_next = compute_max_variance(jnp.array(X), jnp.array(y).reshape(-1, 1), candidates, lambda_, d)
-                y_next = f_single(x_next, J, beta)
-                X.append(x_next)
-                y.append(y_next)
+            x_next = compute_max_variance(jnp.array(X), jnp.array(y).reshape(-1, 1), candidates, lambda_, d)
+            y_next = f_single(x_next, J, beta)
 
-            X_bmc, f_vals_bmc = jnp.array(X), jnp.array(y)
-            mu_bmc, _ = bayesian_cubature(X_bmc, f_vals_bmc, lambda_, d)
-            jax.block_until_ready(mu_bmc)
-            bmc_means.append(mu_bmc)
-        else:
-            bmc_means.append(jnp.nan)
+            X = X.at[i].set(x_next)
+            y = y.at[i].set(y_next)
 
-        if run_mc:
-            key, subkey = jax.random.split(key)
-            idxs_mc = jax.random.choice(subkey, len(all_states), shape=(n,), replace=True)
-            X_mc = all_states[idxs_mc]
-            f_vals_mc = f_batch(X_mc, J, beta)
-            mu_mc = jnp.mean(f_vals_mc)
-            jax.block_until_ready(mu_mc)
-            mc_means.append(mu_mc)
-        else:
-            mc_means.append(jnp.nan)
+        X_sam_bmc, f_sam_bmc = jnp.array(X), jnp.array(y)
+        mu_sam_bmc, _ = bayesian_cubature(X_sam_bmc, f_sam_bmc, lambda_, d)
+        jax.block_until_ready(mu_sam_bmc)
+        bmc_sam_means.append(mu_sam_bmc)
 
-        elapsed = time.time() - start
-        times.append(elapsed)
-
-        if run_bmc:
-            print(f"n={n}, Time={elapsed:.3f}s, BMC err={float(jnp.abs(mu_bmc - t_e)):.10f}")
-        if run_mc:
-            print(f"n={n}, MC   err={float(jnp.abs(mu_mc - t_e)):.10f}")
 
     return {
         "true_val": t_e,
         "bmc_means": jnp.array(bmc_means),
-        "mc_means": jnp.array(mc_means),
-        "times": jnp.array(times)
+        "bmc_sam_means": jnp.array(bmc_sam_means),
     }
 
-def run_multiple_seeds(f_single, n_vals, lambda_, d, L, num_seeds, beta, t_e, all_states):
+def run_multiple_seeds(f_single, n_vals, lambda_, d, L, num_seeds, beta, t_e, all_states, run_mc, run_bmc, subsample):
     bmc_all = []
-    mc_all = []
-    times_all = []
+    bmc_sam_all = []
 
     for seed in range(num_seeds):
         print(f"\n--- Seed {seed} ---")
-        run_bmc = (seed == 0)
-        run_mc = True
 
         result = run_experiment(
             f_single, n_vals, lambda_, d, L,
             seed, beta, t_e, all_states,
-            run_mc=run_mc, run_bmc=run_bmc
+            run_mc, run_bmc, subsample
         )
 
-        if run_bmc:
-            bmc_all.append(result["bmc_means"])
-            times_all.append(result["times"])
+        bmc_all.append(result["bmc_means"])
+        bmc_sam_all.append(result["bmc_sam_means"])
 
-        mc_all.append(result["mc_means"])
+    bmc_all = jnp.stack(bmc_all)
+    bmc_abs_error = jnp.mean(jnp.abs(bmc_all - result["true_val"]), axis=0)
 
-    mc_all = jnp.stack(mc_all)
-    mc_abs_error = jnp.mean(jnp.abs(mc_all - result["true_val"]), axis=0)
+    bmc_sam_all = jnp.stack(bmc_sam_all)
+    bmc_sam_abs_error = jnp.mean(jnp.abs(bmc_sam_all - result["true_val"]), axis=0)
 
-    if bmc_all:
-        bmc_all = jnp.stack(bmc_all)
-        bmc_abs_error = jnp.abs(bmc_all[0] - result["true_val"])
-        avg_time = jnp.array(times_all[0])
-    else:
-        bmc_abs_error = None
-        avg_time = None
+
 
     return {
         "true_val": result["true_val"],
         "bmc_mean_error": bmc_abs_error,
-        "mc_mean_error": mc_abs_error,
-        "times_mean": avg_time
+        "bmc_sam_mean_error": bmc_sam_abs_error
     }
 
-def plot_results(n_vals, results, save_path="results"):
-    os.makedirs(save_path, exist_ok=True)
-    true_val = results["true_val"]
-    bmc_errors = jnp.abs(results["bmc_means"] - true_val)
-    mc_errors = jnp.abs(results["mc_means"] - true_val)
-    bmc_errors = jnp.clip(bmc_errors, 1e-10)
-    mc_errors = jnp.clip(mc_errors, 1e-10)
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(n_vals, mc_errors, 'ko-', label="MC Absolute Error")
-    plt.plot(n_vals, bmc_errors, 'ro-', label="BQ Absolute Error")
-    plt.title("Absolute Error: BQ vs MC (BO via Max Variance)")
-    plt.xlabel("n (number of points)")
-    plt.ylabel("Absolute Error (log scale)")
-    plt.yscale('log')
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_path, "abs_error_bo_maxvar.png"), dpi=300)
-    plt.close()
 
 def main():
     k_b = 1
     T_c = 2.269
     beta = 1 / (k_b * T_c)
-    L = 4
+    L = 3
     d = L * L
     n_vals = jnp.array([10, 50, 100, 200])
     num_seeds = 10
-    lambda_val = 0.01
+    lambda_ = 0.01
+    sub_sample = 200
 
     t_e, all_states = true_expectation(L, d, beta)
-    results = run_multiple_seeds(f_single, n_vals, lambda_val, d, L, num_seeds, beta, t_e, all_states)
+    bo_mc_subsampled_results = run_multiple_seeds(f_single, n_vals, lambda_, d, L, num_seeds, beta, t_e, all_states, True, True, sub_sample)
 
     print("\n=== Final Averaged Results ===")
     print("n =", n_vals)
-    print("True value:", results["true_val"])
-    print("BMC mean error:", results["bmc_mean_error"])
-    print("MC  mean error:", results["mc_mean_error"])
-    print("Avg runtime per n:", results["times_mean"])
-
+    print("True value:", bo_mc_subsampled_results["true_val"])
+    print("BMC mean error:", bo_mc_subsampled_results["bmc_mean_error"])
+    print("BMC Subsampled mean error:", bo_mc_subsampled_results["bmc_sam_mean_error"])    
 
 if __name__ == "__main__":
     main()
