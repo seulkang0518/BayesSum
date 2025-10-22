@@ -1,29 +1,27 @@
-# System
-.DS_Store
+# keep only selected Python files
+*.py
+!potts.py
+!poisson.py
+!Ising.py
+!unnormalised_potts.py
+!protein_potts_mll.py
+!protein_potts_cd.py
+!cmp_salesdata.py
+!calibration.py
+!kme_test.py
+
+# ignore system and data junk
 __pycache__/
 *.pyc
-.python-version
-
-# Results / artifacts
+.DS_Store
 results*/
-results/
 *.pdf
 *.png
-*.svg
 *.npz
 *.pkl
 *.log
-*.aux
-*.out
-
-# Alignment / datasets (adjust as needed)
-PF*
-Pfam-A.*
-*.sto
-*.fasta
-*.gz
 *.csv
 *.json
-
-# Scratch
-tmp*/
+*.fasta
+*.sto
+*.gz
