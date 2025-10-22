@@ -1,17 +1,29 @@
-# macOS cruft
+# System
 .DS_Store
-
-# Python
 __pycache__/
 *.pyc
-
-# Results & figures
-results/
-meeting/
-*.png
-*.pdf
-*.npz
-*.npy
-
-# Misc local env
 .python-version
+
+# Results / artifacts
+results*/
+results/
+*.pdf
+*.png
+*.svg
+*.npz
+*.pkl
+*.log
+*.aux
+*.out
+
+# Alignment / datasets (adjust as needed)
+PF*
+Pfam-A.*
+*.sto
+*.fasta
+*.gz
+*.csv
+*.json
+
+# Scratch
+tmp*/
