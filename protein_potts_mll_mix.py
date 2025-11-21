@@ -29,13 +29,14 @@ jax.config.update("jax_enable_x64", True)
 # ================================================================
 # Utilities: params, masks, energy, data
 # ================================================================
-def init_params_from_seed(seed, L, q, scale=0.01):
+def init_params_from_seed(seed, L, q, scale=0.01): 
     key = jax.random.PRNGKey(seed)
     k_h, k_J = jax.random.split(key)
     h0 = scale * jax.random.normal(k_h, (L, q), dtype=jnp.float64)
     J0 = scale * jax.random.normal(k_J, (L, L, q, q), dtype=jnp.float64)
     return h0, J0
 
+## Modifying J such that we allow nearest-neighbor couplings on this 1D chain
 def adjacency_mask_1d(L):
     M = jnp.zeros((L, L), dtype=jnp.float64)
     idx = jnp.arange(L - 1)
@@ -51,7 +52,7 @@ def project_J(J, J_mask):
 @jit
 def energy(x, h, J, J_mask):
     Jeff = project_J(J, J_mask)
-    e_J = 0.5 * jnp.einsum('ik,ijkl,jl->', x, Jeff, x)  # pairwise
+    e_J = 0.5 * jnp.einsum('ik,ijkl,jl->', x, Jeff, x)  # pairwise - 0.5 is multiplied to avoid double counting
     e_h = jnp.einsum('ik,ik->', x, h)                  # field
     return -(e_J + e_h)
 
@@ -63,6 +64,7 @@ def generate_categorical_sequence(key, p, L, q):
     seq = [jax.random.choice(k, q, p=probs) for k in keys]
     return jnp.array(seq, dtype=jnp.int32)
 
+# Generating sequences and their onehot encodings
 def data_preprocess(p, q, L, num_sequences, seed=42):
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, num_sequences)
@@ -70,17 +72,9 @@ def data_preprocess(p, q, L, num_sequences, seed=42):
     data_onehot = jax.nn.one_hot(jnp.stack(sequences), num_classes=q, dtype=jnp.float64)  # (N,L,q)
     return sequences, data_onehot
 
-def median_hamming_lambda(X_onehot):
-    Lh = X_onehot.shape[1]
-    Dmatch = jnp.einsum("ilq,jlq->ij", X_onehot, X_onehot)
-    H = Lh - Dmatch # Calculate hamming distance for X_onehot
-    tri = jnp.triu_indices(H.shape[0], 1)
-    med = jnp.median(H[tri]) # Find median value
-    return float(jnp.log(2.0) / jnp.clip(med, 1e-8, None)) #To make median distance to have K(x,y) = 0.5 
-
-# ================================================================
-# KSD² diagnostic (exp-Hamming) with fixed eval + global lambda
-# ================================================================
+# =========================================================================
+# KSD² diagnostic with exp-Hamming Kernel with fixed X_eval + global lambda
+# =========================================================================
 @partial(jit, static_argnames=['shift'])
 def get_neighbor(x_i, shift):
     return jnp.roll(x_i, shift=shift, axis=-1)
@@ -131,6 +125,14 @@ def compute_discrete_ksd(samples, h, J, J_mask, beta, lam, n_samples=None):
     M = u(samples[:n_samples], samples[:n_samples], h, J, J_mask, beta, lam)
     total = jnp.sum(M) - jnp.sum(jnp.diag(M))
     return total / (n_samples * (n_samples - 1))
+
+def median_hamming_lambda(X_onehot): # Find lambda value for ksd evaluation
+    Lh = X_onehot.shape[1]
+    Dmatch = jnp.einsum("ilq,jlq->ij", X_onehot, X_onehot)
+    H = Lh - Dmatch # Calculate hamming distance for X_onehot
+    tri = jnp.triu_indices(H.shape[0], 1)
+    med = jnp.median(H[tri]) # Find median value
+    return float(jnp.log(2.0) / jnp.clip(med, 1e-8, None)) #To make median distance to have K(x,y) = 0.5 
 
 # ================================================================
 # Mixture proposal Q_MIX (for ISMC / BQ-importance)
@@ -255,11 +257,11 @@ def logZ_exact_enumeration(h, J, J_mask, beta, L: int, q: int, chunk: int = 200_
         logZ = jnp.logaddexp(logZ, chunk_lse)
     return float(logZ)
 
-def evaluate_logZ_nll_exact(params, X_eval, beta, J_mask):
+def evaluate_logZ_nll_exact(params, X_eval, beta, J_mask): # NLL = -LL = data_term + logZ
     h, J = params
     L, q = X_eval.shape[1], X_eval.shape[2]
     E_data = vmap(energy, in_axes=(0, None, None, None))(X_eval, h, J, J_mask)
-    data_term = jnp.mean(beta * E_data)
+    data_term = jnp.mean(beta * E_data) 
     logZ = logZ_exact_enumeration(h, J, J_mask, beta, L, q)
     return float(logZ), float(data_term + logZ)
 
