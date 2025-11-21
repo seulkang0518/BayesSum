@@ -356,19 +356,18 @@ if __name__ == "__main__":
 
     I_true = ackley2c_truth_d1_exact(L)
     print(f"Large-MC ground truth: I_true = {I_true:+.8f}")
-    
-    # storage
+
     err_mc_mean,    err_mc_std    = [], []
     err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
 
     for n in ns:
-        # RBQ (randomized designs, mean±sd over reps)
+        # BayesSum
         m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, lambda_c, seeds, q, I_true)
         err_rbq_shr_m.append(m_e_s)
         err_rbq_shr_s.append(s_e_s)
         sd_rbq_shr_m.append(m_sd_s)
 
-        # MC baseline (mean±sd over reps)
+        # MC baseline
         mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true)
         err_mc_mean.append(mc_mean_err)
         err_mc_std.append(mc_std_err)
@@ -379,8 +378,6 @@ if __name__ == "__main__":
             f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
         )
 
-    # Package results for the new plotting helper.
-    # Convert (std across reps) -> standard error for 95% CIs: se = std / sqrt(reps)
     all_results = {
         "RBQ": {
             "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
