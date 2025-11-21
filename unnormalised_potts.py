@@ -7,6 +7,8 @@ from functools import partial
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 import scipy.stats
+import math
+from jax.scipy.special import erfinv
 
 jax.config.update("jax_enable_x64", True)
 
@@ -280,42 +282,186 @@ def bayes_sard(oracle: PottsOracle, X, fvals, ridge=1e-3, jitter=1e-8):
     w = (v / denom).reshape(n)               # (n,)
 
     mu_hat = w @ fvals                        # (p,)
-    return mu_hat
+    var_hat = jnp.maximum(0.0, w @ (Ks @ w))
+
+    return mu_hat, var_hat
+
+
+def save_errors(filename, sample_sizes, all_errors, all_vars):
+    out = {"sample_sizes": np.asarray(sample_sizes, dtype=int)}
+    for method, per_N_lists in all_errors.items():
+        # per_N_lists: list over sample_sizes, each is list over seeds
+        arr = np.asarray([np.asarray(lst, dtype=float) for lst in per_N_lists], dtype=float)
+        out[f"{method}_errors"] = arr  # shape (num_sample_sizes, seeds)
+    np.savez(filename, **out)
+
+    for method, per_N_lists in all_vars.items():
+        # per_N_lists: list over sample_sizes, each is list over seeds
+        arr = np.asarray([np.asarray(lst, dtype=float) for lst in per_N_lists], dtype=float)
+        out[f"{method}_vars"] = arr  # shape (num_sample_sizes, seeds)
+    np.savez(filename + "_vars", **out)
+
+    print(f"Saved {filename} (portable)")
+
+def load_errors(filename1, filename2):
+    data1 = np.load(filename1)
+    data2 = np.load(filename2)
+    sample_sizes = data1["sample_sizes"]
+    all_errors = {}
+    all_vars = {}
+
+    for key in data1.files:
+        if key == "sample_sizes":
+            continue
+        if key.endswith("_errors"):
+            method = key[:-len("_errors")]  # strip suffix
+            arr = data1[key]  # shape (num_sample_sizes, seeds)
+            all_errors[method] = [row.tolist() for row in arr]
+
+    for key in data2.files:
+        if key == "sample_sizes":
+            continue
+        if key.endswith("_vars"):
+            method = key[:-len("_vars")]  # strip suffix
+            arr = data2[key]  # shape (num_sample_sizes, seeds)
+            all_vars[method] = [row.tolist() for row in arr]
+
+    return sample_sizes, all_errors, all_vars
 
 # -------------------------
 # 5) Plot
 # -------------------------
+def calibration(n_calibration, seeds, lambda_, d, q, beta, t_e, key_seed, burnin, thinning):
+    mus, vars_ = [], []
+
+    key = jax.random.PRNGKey(key_seed)
+
+    stein_g_mus_n, stein_mh_mus_n = [], []
+    stein_g_vars_n, stein_mh_vars_n = [], []
+
+    for r in range(seeds):
+        key_gibbs = jax.random.fold_in(key, r)
+        key_mh    = jax.random.fold_in(key, r+5)
+
+        # Gibbs MC
+        X_gibbs = gibbs_sample(oracle, key_gibbs, n_calibration, burnin, thinning)
+        fvals_gibbs = vmap(f)(X_gibbs)
+
+        # MH MC
+        X_mh = metropolis_hastings_sample(oracle, key_mh, n_calibration, burnin, thinning)
+        fvals_mh = vmap(f)(X_mh)
+
+        # Stein-BQ using Gibbs design
+        bsc_g_mu, bsc_g_var = bayes_sard(oracle, X_gibbs, fvals_gibbs)
+        stein_g_mus_n.append(bsc_g_mu)
+        stein_g_vars_n.append(bsc_g_var)
+
+        # Stein-BQ using MH design
+        bsc_mh_mu, bsc_mh_var = bayes_sard(oracle, X_mh, fvals_mh)
+        stein_mh_mus_n.append(bsc_mh_mu)
+        stein_mh_vars_n.append(bsc_mh_var)
+
+    stein_g_mus_n  = jnp.array(stein_g_mus_n)
+    stein_g_vars_n = jnp.maximum(jnp.array(stein_g_vars_n), 1e-30)
+
+    stein_mh_mus_n  = jnp.array(stein_mh_mus_n)
+    stein_mh_vars_n = jnp.maximum(jnp.array(stein_mh_vars_n), 1e-30)
+
+    C_nom = jnp.concatenate([jnp.array([0.0]), jnp.linspace(0.05, 0.99, 20)])
+    z = jnp.sqrt(2.0) * erfinv(C_nom) 
+
+    half_g = z[:,None] * jnp.sqrt(stein_g_vars_n)[None,:]
+    inside_g = (t_e >= stein_g_mus_n[None,:] - half_g) & (t_e <= stein_g_mus_n[None,:] + half_g)
+    emp_cov_g = jnp.mean(inside_g, axis=1)
+
+    half_mh = z[:,None] * jnp.sqrt(stein_mh_vars_n)[None,:]
+    inside_mh = (t_e >= stein_mh_mus_n[None,:] - half_mh) & (t_e <= stein_mh_mus_n[None,:] + half_mh)
+    emp_cov_mh = jnp.mean(inside_mh, axis=1)
+
+    return float(t_e), C_nom, emp_cov_g, emp_cov_mh
+
+
+def estimate_alpha(N, MAE, min_index=1):
+    N_fit = N[min_index:]
+    mae_fit = MAE[min_index:]
+
+    x = np.log(N_fit)
+    y = np.log(mae_fit)
+
+    a, b = np.polyfit(x, y, 1)
+    alpha = -a
+    return alpha, a, b
+
+def format_log_label(n):
+
+    if n <= 0:
+        return r"$0$"
+    e = math.floor(math.log10(n))
+    m = n / (10**e)
+    
+    m_str = "{:.1f}".format(m)
+    if m_str == "1.0":
+        return r"$10^{{{}}}$".format(e)
+    else:
+        return r"${} \times 10^{{{}}}$".format(m_str, e)
+
 def plot_results(sample_sizes, all_errors):
     plt.figure()
     styles = {
-        'Gibbs':   {'color': 'black',   'marker': 'o', 'label': 'Gibbs', 'linestyle': '--'},
-        'Metropolis Hastings':      {'color': 'black',  'marker': 's', 'label': 'Metropolis Hastings', 'linestyle': '-'},
-        'BayesSum':   {'color': 'blue',    'marker': 'D', 'label': 'BayesSum', 'linestyle': '-'},
+        'Gibbs':                 {'color': 'black', 'marker': 'o', 'label': 'Gibbs',                 'linestyle': '--'},
+        'Metropolis Hastings':   {'color': 'black', 'marker': 's', 'label': 'Metropolis Hastings',   'linestyle': '-'},
+        'BayesSum (Gibbs)':      {'color': 'blue',  'marker': 'D', 'label': 'Gibbs',                 'linestyle': '--'},
+        'BayesSum (MH)':         {'color': 'blue',  'marker': '^', 'label': 'Metropolis Hastings',   'linestyle': '-'},
     }
+
+    eps = 1e-12
     for name, error_data in all_errors.items():
+        # error_data: list over sample_sizes, each is list over seeds
+        # -> matrix shape (seeds, num_sample_sizes)
         errors_matrix = np.array(error_data).T
-        mean_err = np.mean(errors_matrix, axis=0)
-        se_err = scipy.stats.sem(errors_matrix, axis=0)
-        y_low = np.clip(mean_err - 1.96 * se_err, 1e-12, None)
-        y_high = mean_err + 1.96 * se_err
+
+        # Robust center and spread across seeds
+        median_err = np.median(errors_matrix, axis=0)
+        q25 = np.quantile(errors_matrix, 0.25, axis=0)
+        q75 = np.quantile(errors_matrix, 0.75, axis=0)
+
         st = styles[name]
 
-        label = None if name == "BayesSum" else st['label']
-
+        # Plot median line
         plt.plot(
-            sample_sizes, np.clip(mean_err, 1e-12, None),
+            sample_sizes, np.clip(median_err, eps, None),
             linestyle=st['linestyle'], color=st['color'], marker=st['marker'],
-            label=label, lw=2, markersize=8
+            label=None, lw=2, markersize=8
         )
+
+        # Shade IQR (25–75%)
+        y_low  = np.clip(q25, eps, None)
+        y_high = np.clip(q75, eps, None)
         plt.fill_between(sample_sizes, y_low, y_high, color=st['color'], alpha=0.15)
 
-
+    plt.xscale('log')
     plt.yscale('log')
-    plt.title("Unnormalized Potts")
-    plt.xlabel("Number of Points")
-    plt.ylabel("Absolute Error")
+    plt.title("Potts Model", fontsize=32)
+    plt.xlabel("Number of Points", fontsize=32)
+    plt.ylabel("Absolute Error", fontsize=32)
+
+    log_labels = [format_log_label(n) for n in sample_sizes]
+    
+    plt.xticks(sample_sizes, log_labels, fontsize=28) 
+    plt.gca().xaxis.set_major_locator(plt.FixedLocator(sample_sizes))
+    plt.gca().xaxis.set_minor_locator(plt.NullLocator())
+
     plt.grid(True, which='major', linestyle='--', linewidth=0.5)
-    plt.legend(loc='best', fontsize=20)
+
+    # Manual legend just for the sampler families (as you had)
+    plt.legend(
+        handles=[
+            plt.Line2D([], [], color='black', marker='o', linestyle='--', label='Gibbs'),
+            plt.Line2D([], [], color='black', marker='s', linestyle='-',  label='Metropolis Hastings'),
+        ],
+        fontsize=32, loc='best'
+    )
+
     plt.tight_layout()
     filename = "stein_kernel_abs_error.pdf"
     plt.savefig(filename, format='pdf')
@@ -338,44 +484,112 @@ if __name__ == "__main__":
     # Test function
     f = lambda x: 1.0 / (1.0 + jnp.exp(-jnp.sum(x).astype(jnp.float64) / d))
 
-    # Exact expectation (batched full enumeration if q^d <= 3**16)
-    E_true = exact_expectation_auto(oracle, f, max_states=3**16, batch_size=200_000)
-    print(f"Ground-truth E[sigmoid(sum(x)/d)]: {float(E_true):.6f}\n")
+    # # Exact expectation (batched full enumeration if q^d <= 3**16)
+    # E_true = exact_expectation_auto(oracle, f, max_states=3**16, batch_size=200_000)
+    # print(f"Ground-truth E[sigmoid(sum(x)/d)]: {float(E_true):.6f}\n")
 
-    sample_sizes = [100, 200, 500, 1000]
-    seeds = 10
+    # sample_sizes = [100, 210, 460, 1000]
+    sample_sizes = [100, 178, 316, 562, 1000]
+    seeds = 50
     burnin, thinning = 500, 5
 
-    all_errors = {'Gibbs': [], 'Metropolis Hastings': [], 'BayesSum': []}
+    all_errors = {'Gibbs': [], 'Metropolis Hastings': [], 'BayesSum (Gibbs)': [], 'BayesSum (MH)': []}
+    all_vars = {'BayesSum (Gibbs)': [], 'BayesSum (MH)': []}
+    bsc_mus = []
+    bsc_vars = []
 
-    for n in sample_sizes:
-        gibbs_errs_n, mh_errs_n, stein_errs_n = [], [], []
-        for r in range(seeds):
-            key_gibbs = jax.random.fold_in(k3, r)
-            key_mh    = jax.random.fold_in(k4, r)
+    # for n in sample_sizes:
+    #     gibbs_errs_n, mh_errs_n, stein_g_errs_n, stein_mh_errs_n = [], [], [], []
+    #     gibbs_vars_n, mh_vars_n, stein_g_vars_n, stein_mh_vars_n = [], [], [], []
 
-            # Gibbs MC
-            X_gibbs = gibbs_sample(oracle, key_gibbs, n, burnin=burnin, thinning=thinning)
-            fvals_gibbs = vmap(f)(X_gibbs)
-            E_gibbs_mc = float(jnp.mean(fvals_gibbs))
-            gibbs_errs_n.append(abs(E_gibbs_mc - E_true))
+    #     for r in range(seeds):
+    #         key_gibbs = jax.random.fold_in(k3, r)
+    #         key_mh    = jax.random.fold_in(k4, r)
 
-            # MH MC
-            X_mh = metropolis_hastings_sample(oracle, key_mh, n, burnin=burnin, thinning=thinning)
-            fvals_mh = vmap(f)(X_mh)
-            E_mh_mc = float(jnp.mean(fvals_mh))
-            mh_errs_n.append(abs(E_mh_mc - E_true))
+    #         # Gibbs MC
+    #         X_gibbs = gibbs_sample(oracle, key_gibbs, n, burnin=burnin, thinning=thinning)
+    #         fvals_gibbs = vmap(f)(X_gibbs)
+    #         E_gibbs_mc = float(jnp.mean(fvals_gibbs))
+    #         gibbs_errs_n.append(abs(E_gibbs_mc - E_true))
 
-            # Stein-BQ (plain posterior mean) using Gibbs design
-            bsc_mu = bayes_sard(oracle, X_gibbs, fvals_gibbs)
-            stein_errs_n.append(abs(bsc_mu - E_true))
+    #         # MH MC
+    #         X_mh = metropolis_hastings_sample(oracle, key_mh, n, burnin=burnin, thinning=thinning)
+    #         fvals_mh = vmap(f)(X_mh)
+    #         E_mh_mc = float(jnp.mean(fvals_mh))
+    #         mh_errs_n.append(abs(E_mh_mc - E_true))
 
-        print(f"n={n:4d} | Gibbs-MC err       : {np.mean(gibbs_errs_n):.4e} (±{np.std(gibbs_errs_n):.2e})")
-        print(f"       | MH-MC err          : {np.mean(mh_errs_n):.4e} (±{np.std(mh_errs_n):.2e})")
-        print(f"       | Stein-BQ err       : {np.mean(stein_errs_n):.4e} (±{np.std(stein_errs_n):.2e})")
+    #         # Stein-BQ using Gibbs design
+    #         bsc_g_mu, bsc_g_var = bayes_sard(oracle, X_gibbs, fvals_gibbs)
+    #         # bsc_mus.append(bsc_mu); bsc_vars.append(bsc_var)
+    #         stein_g_errs_n.append(abs(bsc_g_mu - E_true))
+    #         stein_g_vars_n.append(bsc_g_var)
 
-        all_errors['Gibbs'].append(gibbs_errs_n)
-        all_errors['Metropolis Hastings'].append(mh_errs_n)
-        all_errors['BayesSum'].append(stein_errs_n)
+    #         # Stein-BQ using MH design
+    #         bsc_mh_mu, bsc_mh_var = bayes_sard(oracle, X_mh, fvals_mh)
+    #         # bsc_mus.append(bsc_mu); bsc_vars.append(bsc_var)
+    #         stein_mh_errs_n.append(abs(bsc_mh_mu - E_true))
+    #         stein_mh_vars_n.append(bsc_mh_var)
 
+    #     # print(f"n={n:4d} | Gibbs-MC err       : {np.mean(gibbs_errs_n):.4e} (±{np.std(gibbs_errs_n):.2e})")
+    #     # print(f"       | MH-MC err          : {np.mean(mh_errs_n):.4e} (±{np.std(mh_errs_n):.2e})")
+    #     # print(f"       | Stein-BQ (Gibbs) err       : {np.mean(stein_g_errs_n):.4e} (±{np.std(stein_g_errs_n):.2e})")
+    #     # print(f"       | Stein-BQ (MG) err       : {np.mean(stein_mh_errs_n):.4e} (±{np.std(stein_mh_errs_n):.2e})")
+
+    #     all_errors['Gibbs'].append(gibbs_errs_n)
+    #     all_errors['Metropolis Hastings'].append(mh_errs_n)
+    #     all_errors['BayesSum (Gibbs)'].append(stein_g_errs_n)
+    #     all_errors['BayesSum (MH)'].append(stein_mh_errs_n)
+
+    #     all_vars['BayesSum (Gibbs)'].append(stein_g_vars_n)
+    #     all_vars['BayesSum (MH)'].append(stein_mh_vars_n)
+
+    # save_errors("unnormalised_potts_1.npz", sample_sizes, all_errors, all_vars)
+    # print("unnormalised_potts_1.npz")
+
+    sample_sizes, all_errors, all_vars = load_errors("unnormalised_potts_1.npz", "unnormalised_potts_vars_1.npz")
+    # print(all_errors)
+    methods = ["Gibbs", "Metropolis Hastings", "BayesSum (Gibbs)", "BayesSum (MH)"]
+
+    def compute_means(results_dict):
+        means = {}
+        for method, arrays in results_dict.items():
+            # arrays is a list of lists → convert each to numpy and take mean
+            method_means = [np.mean(np.array(arr)) for arr in arrays]
+            means[method] = method_means
+        return means
+
+    means_dict = compute_means(all_errors)
+
+    for m in methods:
+        alpha, a, b = estimate_alpha(sample_sizes, means_dict[m], min_index=1)
+        print(f"{m}: α ≈ {alpha}")
+
+    print(all_errors)
+    print(all_vars)
     plot_results(sample_sizes, all_errors)
+
+    # calibrations = {}
+    # calibration_seeds = 50
+    # n_calibration = 60
+    # key_seed = 5
+    # t_e, C_nom, emp_cov_g, emp_cov_mh = calibration(n_calibration, calibration_seeds, lam, d, q, beta, E_true, key_seed, burnin, thinning)
+    # jnp.savez("results/unnormalised_potts_g_calibration_results.npz",
+    #          t_true=t_e, C_nom=jnp.array(C_nom),emp_cov=jnp.array(emp_cov_g))
+    # jnp.savez("results/unnormalised_potts_mh_calibration_results.npz",
+    #          t_true=t_e, C_nom=jnp.array(C_nom),emp_cov = jnp.array(emp_cov_mh))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

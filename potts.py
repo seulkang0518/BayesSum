@@ -9,6 +9,8 @@ import jax.random as jrand
 from jax import lax
 from jax.scipy.special import erfinv
 import scipy.stats 
+import math
+import matplotlib.lines as mlines
 
 plt.rcParams['axes.grid'] = True
 plt.rcParams['font.family'] = 'DeJavu Serif'
@@ -186,41 +188,43 @@ def sample_onehot_single(key, d, q):
     return one_hot_from_ints(idx[None], d, q)[0]
 
 def rr_debiased_mc_estimator_linear(key, J, h, beta, d, q, rho=0.95, max_steps=1_000_000):
-    m = 0
+    rho = float(jnp.clip(rho, 0.0, 0.999999))
     qm = 1.0
     total = 0.0
-    used = 0
-    sum_f = 0.0
+    n_samples = 0
     S_prev = 0.0
     subkey = key
 
+    
     subkey, sk = jrand.split(subkey)
-    x = sample_onehot_single(sk, d, q)                 
-    fx = f_single(x, J, h, beta)
-    sum_f += fx
+    x0 = sample_onehot_single(sk, d, q)
+    fx0 = f_single(x0, J, h, beta)
+    sum_f = fx0
     S_m = sum_f / 1.0
-    total += (S_m - S_prev) / qm
+    total += (S_m - 0.0) / qm  # q0 = 1
     S_prev = S_m
-    used = 1
+    n_samples = 1
 
-    while m < max_steps:
-        subkey, sk = jrand.split(subkey)
-        cont = jrand.bernoulli(sk, p=jnp.asarray(rho))
-        if not bool(cont):
+
+    while n_samples < max_steps:
+        
+        subkey, sk_rr = jrand.split(subkey)
+        if not bool(jrand.bernoulli(sk_rr, p=jnp.asarray(rho))):
             break
-        m += 1
-        qm *= rho
 
-        subkey, sk = jrand.split(subkey)
-        x = sample_onehot_single(sk, d, q)             
+        qm *= rho  # q_m = rho^m
+
+        subkey, sk_x = jrand.split(subkey)
+        x = sample_onehot_single(sk_x, d, q)
         fx = f_single(x, J, h, beta)
         sum_f += fx
-        S_m = sum_f / (m + 1)
+        S_m = sum_f / (n_samples + 1)
+
         total += (S_m - S_prev) / qm
         S_prev = S_m
-        used += 1
+        n_samples += 1
 
-    return float(total), used
+    return float(total), int(n_samples)
 
 # ----Stratified Sampling (4 Strata)-----------------------------------------------
 
@@ -263,6 +267,45 @@ def stratified_mc_estimator_4(key, n: int, d: int, q: int, J, h, beta):
         used   += n_per
 
     return mu_sum, used
+
+
+# ------------ Importance Sampling: q(x) ∝ exp(-β ∑⟨h_i, x_i⟩), no interactions -----------
+
+@jit
+def proposal_log_probs(beta, h):
+    logits = -beta * h
+    m = jnp.max(logits, axis=1, keepdims=True)
+    z = m + jnp.log(jnp.sum(jnp.exp(logits - m), axis=1, keepdims=True))
+    return logits - z  # (d, q)
+
+@partial(jit, static_argnums=(1,))  # n is static if you want, but not required
+def sample_from_proposal(key, n, log_p):
+
+    d, q = log_p.shape
+    keys = jrand.split(key, d)
+    samples = [jrand.categorical(k, logits=log_p[i][None, :], shape=(n,)) for i, k in enumerate(keys)]
+    X_int = jnp.stack(samples, axis=1)  # (n, d)
+    return jax.nn.one_hot(X_int, q, dtype=jnp.float64)  # (n, d, q)
+
+@jit
+def log_q_of_X(X, log_p):
+    return jnp.sum(jnp.einsum('ndq,dq->nd', X, log_p), axis=1)
+
+
+@partial(jit, static_argnums=(1,))
+def importance_sampling_uniform_mean(key, n, J, h, beta, d, q):
+
+    log_p = proposal_log_probs(beta, h)                 # (d, q)
+    X = sample_from_proposal(key, int(n), log_p)        # (n, d, q)
+
+    lq = log_q_of_X(X, log_p)                           # (n,)
+    fx = f_batch(X, J, h, beta)                         # (n,)  (already exp(β E))
+    lw = jnp.log(fx) - lq                               # (n,)
+    m = jnp.max(lw)
+    Z_hat = jnp.exp(m) * jnp.mean(jnp.exp(lw - m))      # estimate of Z = Σ f(x)
+    qd = (q ** d)
+    mu_hat = Z_hat / qd
+    return mu_hat
 
 # --------------------------------------------------------------------------
 def run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_type, sub_sample):
@@ -314,6 +357,9 @@ def run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_t
                 mu_hat, used = stratified_mc_estimator_4(key_random, int(n), d, q, J, h, beta)
                 est_mean = jnp.asarray(mu_hat)
 
+            elif experiment_type == "is":
+                est_mean = importance_sampling_uniform_mean(key_random, int(n), J, h, beta, d, q)
+
         jax.block_until_ready(est_mean)
         elapsed = time.time() - start
         est_means.append(est_mean)
@@ -323,71 +369,155 @@ def run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_t
     return {"true_val": t_true * (q**d), "est_means": jnp.array(est_means) * (q**d), "times": jnp.array(times)}
 
 def run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_true, experiment_type, sub_sample):
-    abs_errors = []
+    """
+    This is the corrected version of the function.
+    """
+    all_errors_across_seeds = []
+    
+    # This loop will now work, as num_seeds is an integer
     for seed in range(num_seeds):
-        print(f"\n--- {experiment_type.upper()} | Seed {seed} ---")
-        res = run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_type, sub_sample)
-        abs_errors.append(jnp.abs(res["est_means"] - res["true_val"])/res["true_val"])
+        print(f"\n--- Running {experiment_type}, Seed {seed+1}/{num_seeds} ---")
+        
+        # Call run_experiment with the correct arguments
+        result = run_experiment(
+            n_vals, lambda_, d, q, seed, 
+            beta, J, h, t_true, 
+            experiment_type, sub_sample
+        )
+        
+        abs_error = jnp.abs(result["est_means"] - result["true_val"])
+        all_errors_across_seeds.append(abs_error)
 
-    abs_errors = jnp.stack(abs_errors)
-    mean_abs_error = jnp.mean(abs_errors, axis=0) 
-    se_abs_error = scipy.stats.sem(abs_errors, axis=0)
+    all_errors = jnp.stack(all_errors_across_seeds)  # shape: [num_seeds, len(n_vals)]
 
-    return {"true_val": t_true, "abs_errors": abs_errors, "mean_abs_error": mean_abs_error, "se_abs_error": se_abs_error}
+    # central tendency + dispersion
+    mean_abs_error = jnp.mean(all_errors, axis=0)
+    se_abs_error   = scipy.stats.sem(np.asarray(all_errors), axis=0)
+    median_abs_error = jnp.median(all_errors, axis=0)
+    q25_abs_error    = jnp.percentile(np.asarray(all_errors), 25, axis=0)
+    q75_abs_error    = jnp.percentile(np.asarray(all_errors), 75, axis=0)
+
+    out = {
+        "mean_abs_error": np.asarray(mean_abs_error),
+        "se_abs_error":   np.asarray(se_abs_error),
+        "median_abs_error": np.asarray(median_abs_error),
+        "q25_abs_error":    np.asarray(q25_abs_error),
+        "q75_abs_error":    np.asarray(q75_abs_error),
+        "true_val": float(result["true_val"]),
+        "abs_errors": np.asarray(all_errors) # Added this for your boxplot data
+    }
+    
+    return out
+
+def format_log_label(n):
+
+    if n <= 0:
+        return r"$0$"
+    e = math.floor(math.log10(n))
+    m = n / (10**e)
+    
+    m_str = "{:.1f}".format(m)
+    if m_str == "1.0":
+        return r"$10^{{{}}}$".format(e)
+    else:
+        return r"${} \times 10^{{{}}}$".format(m_str, e)
 
 def plot_results(n_vals, all_results, save_path="results"):
     os.makedirs(save_path, exist_ok=True)
     styles = {
-        'MC':         {'color': 'k', 'marker': 'o', 'label': 'MC'},
-        'BayesSum':        {'color': 'b', 'marker': 's', 'label': 'BayesSum'},
-        'Active BayesSum': {'color': 'g', 'marker': '^', 'label': 'Active BayesSum'},
-        'RR': {'color': 'r', 'marker': '^', 'label': 'RR'},
+        'MC': {'color': 'k', 'marker': 'o', 'label': 'MC'},
         'SS': {'color': 'c', 'marker': '^', 'label': 'SS'},
+        'BayesSum': {'color': 'b', 'marker': 's', 'label': 'DBQ'},
+        'Active BayesSum': {'color': 'g', 'marker': '^', 'label': 'Active DBQ'},
+        'RR': {'color': 'r', 'marker': 'D', 'label': 'RR'},
+        'IS': {'color': '#A52A2A', 'marker': 'o', 'label': 'IS'},
     }
 
     plt.figure(figsize=(10, 6))
     handles, labels = [], []
+    eps = 1e-12
 
     for name in [m for m in styles.keys() if m in all_results]:
         data = all_results[name]
 
-        mean_err = np.asarray(data["mean_abs_error"])
-        se_err   = np.asarray(data["se_abs_error"])
+        # Prefer median + IQR; fallback to mean ± 1.96*SE if needed
+        if ("median_abs_error" in data) and ("q25_abs_error" in data) and ("q75_abs_error" in data):
+            y_line = np.asarray(data["median_abs_error"])
+            y_low  = np.asarray(data["q25_abs_error"])
+            y_high = np.asarray(data["q75_abs_error"])
+        else:
+            mean_err = np.asarray(data["mean_abs_error"])
+            se_err   = np.asarray(data["se_abs_error"])
+            y_line = mean_err
+            y_low  = mean_err - 1.96 * se_err
+            y_high = mean_err + 1.96 * se_err
 
-        # for log y-scale, keep positive lower bound
-        eps = 1e-12
-        y_low  = np.clip(mean_err - 1.96 * se_err, eps, None)
-        y_high = np.clip(mean_err + 1.96 * se_err, eps, None)
-        y_line = np.clip(mean_err, eps, None)
+        y_line = np.clip(y_line, eps, None)
+        y_low  = np.clip(y_low,  eps, None)
+        y_high = np.clip(y_high, eps, None)
 
         st = styles[name]
         (ln,) = plt.plot(n_vals, y_line, linestyle='-', color=st['color'],
                          marker=st['marker'], label=st['label'])
         plt.fill_between(n_vals, y_low, y_high, color=st['color'], alpha=0.15)
-        handles.append(ln)
-        labels.append(st['label'])
+        handles.append(ln); labels.append(st['label'])
 
-    plt.xlabel("Number of Points")
-    plt.title("Potts")
-    plt.ylabel("Error")
-    plt.yscale('log') # Errors are best viewed on a log scale
+    plt.xlabel("Number of Points", fontsize=32)
+    plt.title("Uniform", fontsize=32)
+    plt.ylabel("Absolute Error", fontsize=32)
+    plt.yscale('log')
+    plt.xscale('log')
+    log_labels = [format_log_label(n) for n in n_vals]
+    
+    plt.xticks(n_vals, log_labels, fontsize=28) 
+    plt.gca().xaxis.set_major_locator(plt.FixedLocator(n_vals))
+    plt.gca().xaxis.set_minor_locator(plt.NullLocator())
+
     plt.grid(True, which='major', linestyle='--', linewidth=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, "Potts_abs_err.pdf"), format='pdf')
-    # plt.show()
+    plt.savefig(os.path.join(save_path, "potts_abs_err.pdf"), format='pdf')
     plt.close()
 
-    fig_legend, ax_legend = plt.subplots(figsize=(6, 1))  # adjust size as needed
-    ax_legend.axis('off')  # no axes
-    ax_legend.legend(handles, labels, ncol=5, loc='center', fontsize=26, frameon=False)
-
-    plt.savefig(os.path.join(save_path, "Potts_abs_err_legend.pdf"), bbox_inches='tight')
+    fig_legend, ax_legend = plt.subplots(figsize=(6, 1))
+    ax_legend.axis('off')
+    ax_legend.legend(handles, labels, ncol=4, loc='center', fontsize=26, frameon=False)
+    plt.savefig(os.path.join(save_path, "potts_abs_err_legend.pdf"), bbox_inches='tight')
     plt.close(fig_legend)
+
+
+def save_results_portable(filename, n_vals, all_results):
+    save_dict = {'n_vals': np.array(n_vals, dtype=int)}
+    for method, data in all_results.items():
+        for field in ["mean_abs_error","se_abs_error","median_abs_error","q25_abs_error","q75_abs_error","true_val"]:
+            if field in data:
+                v = data[field]
+                if field == "true_val":
+                    v = np.array([float(v)], dtype=float)
+                save_dict[f"{method}_{field}"] = np.asarray(v, dtype=float)
+    np.savez(filename, **save_dict)
+    print(f"Saved results to {filename}")
+
+def load_results_portable(filename):
+    data = np.load(filename)
+    n_vals = data['n_vals']
+    all_results = {}
+    for key in data.files:
+        if key == 'n_vals':
+            continue
+        # keys look like "<method>_<field>"
+        if "_" not in key:
+            continue
+        method, field = key.split('_', 1)
+        val = data[key]
+        if field == "true_val":
+            val = val[0]
+        all_results.setdefault(method, {})[field] = val
+    return n_vals, all_results
 
 
 # --------------------------------------------------------------------------
 def lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, seeds, t_e, J, h, beta, key_seed, experiment_type, sub_sample):
-    lam_grid = jnp.geomspace(lam_start, lam_end, lam_num)
+    lam_grid = [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0]
     errs_seeds, sds_seeds = [], []
     key = jax.random.PRNGKey(key_seed)
 
@@ -458,43 +588,36 @@ def lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, seeds, t
         "ERR": ERR
     }
 
+@jit
+def _scale_to_Z(mu, var, d, q):
+    qd = (q ** d).astype(jnp.float64) if isinstance(q, jnp.ndarray) else (q ** d)
+    return qd * mu, (qd * qd) * jnp.maximum(var, 0.0)
 
 def calibration(n_calibration, seeds, lambda_, d, q, beta, t_e, J, h, key_seed):
     mus, vars_ = [], []
+
     key = jax.random.PRNGKey(key_seed)
 
     for s in range(seeds):
         key, subkey = jax.random.split(key)
         X = sample_uniform(subkey, int(n_calibration), d, q)
         y = f_batch(X, J, h, beta)
+
         mu, var = bayesian_cubature(X, y, lambda_, d, q)
         mus.append(mu); vars_.append(var)
-
+        
     mus  = jnp.array(mus)
     vars_ = jnp.maximum(jnp.array(vars_), 1e-30)
 
-    # nominal coverage grid and empirical coverage
     C_nom = jnp.concatenate([jnp.array([0.0]), jnp.linspace(0.05, 0.99, 20)])
-    z = jnp.sqrt(2.0) * erfinv(C_nom)  # two-sided CI half-width multiplier
+    z = jnp.sqrt(2.0) * erfinv(C_nom) 
+
     half = z[:,None] * jnp.sqrt(vars_)[None,:]
     inside = (t_e >= mus[None,:] - half) & (t_e <= mus[None,:] + half)
     emp_cov = jnp.mean(inside, axis=1)
 
-    # plt.figure(figsize=(6.2, 4.6))
-    # plt.plot(np.array(C_nom), np.array(emp_cov), "o-", label=f"N={n}")
-    # plt.plot([0, 1], [0, 1], "k--", label="Ideal")
-    # plt.xlim(0, 1)
-    # plt.ylim(0, 1)
-    # plt.xlabel("Nominal two-sided coverage")
-    # plt.ylabel("Empirical coverage")
-    # plt.title("Uncertainty calibration (Poisson, fixed N)")
-    # plt.legend()
-    # plt.grid(True, ls="--", alpha=0.5)
-    # plt.tight_layout()
-    # plt.show()
-    # plt.close()
-
     return float(t_e), C_nom, emp_cov, mus, vars_
+
 
 def plot_abs_error_boxplots(
     rmses,
@@ -550,22 +673,24 @@ def plot_abs_error_boxplots(
         cap.set(color="black", linewidth=1.0)
 
     centers = [i + (len(methods) - 1) * width / 2 for i in range(len(d_list))]
-    plt.xticks(centers, [f"d={L}" for L in d_list])
+    plt.xticks(centers, [f"d={L}*3" for L in d_list], fontsize=32)
 
     if logy:
         plt.yscale("log")
-    plt.ylabel("Absolute error")
+    plt.ylabel("Absolute Error", fontsize=32)
+    plt.xlabel("Dimension", fontsize=32)
     plt.grid(True, which="major", linestyle="--", alpha=0.5)
 
     handles = [mpatches.Patch(color=mcolors[m], label=m) for m in methods]
-    plt.legend(handles=handles, loc="best")
+    plt.legend(handles=handles, loc="best", fontsize=32)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Saved {save_path}")
 
-def plot_lambda_boxplot(result_dict, n_show=10, logy=True, save_path = "potts_ablation_boxplot.pdf"):
+def plot_lambda_boxplot(result_dict, n_show=10, logy=True,
+                        save_path="potts_ablation_boxplot.pdf"):
     lam_grid = np.array(result_dict["lambda"])
     ERR = np.array(result_dict["ERR"])  # shape (seeds, lam_num)
     ERR = np.abs(ERR)
@@ -577,41 +702,61 @@ def plot_lambda_boxplot(result_dict, n_show=10, logy=True, save_path = "potts_ab
     else:
         idxs = np.arange(lam_num)
 
-    lam_sub = lam_grid[idxs]
+    # here you just decide to keep first 5
+    idxs = idxs[:5]
+    lam_sub = lam_grid[idxs]        # <--- these are your x-axis values
     ERR_sub = ERR[:, idxs]
 
+    # boxplot data per lambda
     data = [ERR_sub[:, i] for i in range(ERR_sub.shape[1])]
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(10, 6))
+
+    # positions = lam_sub -> box centers are exactly at those lambdas
     bp = plt.boxplot(
         data,
-        positions=np.arange(len(lam_sub)),
-        widths=0.6,
+        positions=lam_sub,
+        widths=0.5 * lam_sub,   # small width relative to value (so it doesn't look crazy near 0.01)
         patch_artist=True,
         showfliers=False
     )
 
+    # style
     for box in bp['boxes']:
         box.set(facecolor='blue', alpha=0.7, edgecolor='black')
     for median in bp['medians']:
         median.set(color='black', linewidth=1.5)
 
-    # Label x-axis with chosen lambda values
-    plt.xticks(
-        np.arange(len(lam_sub)),
-        [f"{lam:.1e}" for lam in lam_sub],
-        rotation=45
-    )
-    plt.xlabel("Lengthscale")
-    plt.ylabel("Error")
+    # x-axis: ticks at lam_sub, labels = lam_sub, NO rotation
+    plt.xscale('log')
+    # plt.xticks(lam_sub, [f"{lam:.2g}" for lam in lam_sub], fontsize=32)
+
+    plt.xlabel("Lengthscale", fontsize=32)
+    plt.ylabel("Error", fontsize=32)
+
     if logy:
         plt.yscale('log')
-    plt.title(f"Potts: Lengthscale Ablation")
+
+    plt.title("Uniform: Lengthscale Ablation", fontsize=32)
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"Saved {save_path}")
+
+
+
+def estimate_alpha(N, MAE, min_index=1):
+    N_fit = N[min_index:]
+    mae_fit = MAE[min_index:]
+
+    x = np.log(N_fit)
+    y = np.log(mae_fit)
+
+    a, b = np.polyfit(x, y, 1)
+    alpha = -a
+    return alpha, a, b
+
 
 # --------------------
 # Main
@@ -624,8 +769,9 @@ def main():
     # lambda_ = 0.001
     d = 15
     q = 3
-    n_vals = jnp.array([40, 100, 200, 400, 800]) 
-    num_seeds = 10
+    # n_vals = jnp.array([8, 48, 216, 1000]) 
+    n_vals = jnp.array([8, 28, 84, 220, 1000]) 
+    num_seeds = int(50)
     sub_sample = 2000
 
     # key = jax.random.PRNGKey(0)
@@ -638,111 +784,139 @@ def main():
     # mask = J_mask(d)
     # J = Jsym * mask
 
-    alpha, gamma = 1.0, 0.0
-    h = h_chain(d, q)
-    J = J_chain(d, q, alpha, gamma)
+    # alpha, gamma = 1.0, 0.0
+    # h = h_chain(d, q)
+    # J = J_chain(d, q, alpha, gamma)
     
-    t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ = False)
-    print("True Z:", t_e * (q**d))
+    # t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ = False)
+    # print("True Z:", t_e * (q**d))
 
-    # Ablation
-    lam_start, lam_end, lam_num = 0.001, 0.05, 50
-    seeds_ablation = 10
-    n_ablation = 400
-    ablation = lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, num_seeds, t_e, J, h, beta, 0, "bq_random", None)
-    plot_lambda_boxplot(ablation)
+    # # Ablation
+    # lam_start, lam_end, lam_num = 0.001, 10, 50
+    # seeds_ablation = 50
+    # n_ablation = 400
+    # ablation = lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, seeds_ablation, t_e, J, h, beta, 0, "bq_random", None)
+
+    # # plot_lambda_boxplot(ablation)
     
-
-    results = {
-        "Active BayesSum":        run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_bo", sub_sample),
-        "BayesSum":        run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_random", sub_sample),
-        "MC":         run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "mc", sub_sample),
-        "RR":         run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "rr", sub_sample),
-        "SS":       run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "strat",  sub_sample),
-    }
-
-    print("\nMean absolute errors:")
-    for k, v in results.items():
-        print(k, np.asarray(v["mean_abs_error"]))
-
-    plot_results(n_vals, results)
+    # lambda_ = ablation["lambda_star"]
+    # # print(lambda_)
+    # results = {
+    #     "Active BayesSum":        run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_bo", sub_sample),
+    #     "BayesSum":        run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_random", sub_sample),
+    #     "MC":         run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "mc", sub_sample),
+    #     "RR":         run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "rr", sub_sample),
+    #     "SS":       run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "strat",  sub_sample),
+    #     "IS":       run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "is",  sub_sample),
+    # }
 
 
-    # Ablation
+    # print("\nMean absolute errors:")
+    # for k, v in results.items():
+    #     print(k, np.asarray(v["mean_abs_error"]))
 
-    d_list = [8, 12, 15]
-    methods = [("mc", "MC"), ("bq_random", "BayesSum"), ("bq_bo", "Active BayesSum")]
-    rmses = {label: {} for _, label in methods}
+    # save_results_portable("potts_1.npz", n_vals, results)
+    n_vals, all_results = load_results_portable("potts_1.npz")
+    # print(all_results)
+    # plot_results(n_vals, all_results)
 
-    bq_lambda_stars = {}
-    abq_lambda_stars = {}
+    methods = ["MC", "BayesSum", "Active BayesSum", "RR", "SS", "IS"]
 
-    for d in d_list:
+    for m in methods:
+        alpha, a, b = estimate_alpha(n_vals, all_results[m]["mean_abs_error"], min_index=1)
+        print(f"{m}: α ≈ {alpha:.3f}")
 
-        h = h_chain(d, q)
-        J = J_chain(d, q, alpha, gamma)
-        t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ = False)
+    # # Ablation
 
-        bq_ablation = lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, num_seeds, t_e, J, h, beta, d, "bq_random", None)
-        bq_lambda_star = bq_ablation["lambda_star"]
-        print(bq_ablation["lambda"])
-        print(bq_ablation["rmse"])
-        bq_lambda_stars[d] = bq_lambda_star
+    # d_list = [10]
+    # methods = [("mc", "MC"), ("bq_random", "BayesSum"), ("bq_bo", "Active BayesSum")]
+    # rmses = {label: {} for _, label in methods}
+    # n_ablation = 400
+    # bq_lambda_stars = {}
+    # abq_lambda_stars = {}
 
-        mc_results = run_multiple_seeds([n_ablation], 0.0, d, q, num_seeds, beta, J, h, t_e, "mc", None)
-        rmses["MC"][d] = mc_results["abs_errors"][:, 0]
+    # for d in d_list:
 
-        dbq_results = run_multiple_seeds([n_ablation], bq_lambda_stars[d], d, q, num_seeds, beta, J, h, t_e, "bq_random", None)
-        rmses["BayesSum"][d] = dbq_results["abs_errors"][:, 0]
+    #     h = h_chain(d, q)
+    #     J = J_chain(d, q, alpha, gamma)
+    #     t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ = False)
+    #     print(t_e)
 
-        abq_results = run_multiple_seeds([n_ablation], bq_lambda_stars[d], d, q, num_seeds, beta, J, h, t_e, "bq_bo", sub_sample)
-        rmses["Active BayesSum"][d] = abq_results["abs_errors"][:, 0]
+    #     bq_ablation = lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, seeds_ablation, t_e, J, h, beta, d, "bq_random", None)
+    #     bq_lambda_star = bq_ablation["lambda_star"]
+    #     bq_lambda_stars[d] = bq_lambda_star
 
-     lambda_stars = [0.004558104601977957, 0.004558104601977957, 0.028593018398391068]
+    #     mc_results = run_multiple_seeds([n_ablation], 0.0, d, q, seeds_ablation, beta, J, h, t_e, "mc", None)
+    #     rmses["MC"][d] = mc_results["abs_errors"][:, 0]
+
+    #     dbq_results = run_multiple_seeds([n_ablation], bq_lambda_star, d, q, seeds_ablation, beta, J, h, t_e, "bq_random", None)
+    #     rmses["BayesSum"][d] = dbq_results["abs_errors"][:, 0]
+
+    #     abq_results = run_multiple_seeds([n_ablation], bq_lambda_star, d, q, seeds_ablation, beta, J, h, t_e, "bq_bo", sub_sample)
+    #     rmses["Active BayesSum"][d] = abq_results["abs_errors"][:, 0]
+
+    # lambda_stars = [0.004558104601977957, 0.004558104601977957, 0.028593018398391068]
 
     # print(rmses)
 
-    plot_abs_error_boxplots(
-        rmses,
-        d_list,
-        methods=[label for _, label in methods],
-        save_path="potts_abs_error_boxplot.pdf",
-        logy=True,
-        showfliers=True
-    )
+    # # plot_abs_error_boxplots(
+    # #     rmses,
+    # #     d_list,
+    # #     methods=[label for _, label in methods],
+    # #     save_path="potts_abs_error_boxplot.pdf",
+    # #     logy=True,
+    # #     showfliers=True
+    # # )
 
+#     rmses = {
+#     "MC": {
+#         5: [2.54166095e-04, 7.07450705e-03, 8.04885205e-03, 6.93353856e-03, 2.47596441e-03,
+#             1.49401660e-02, 9.29559119e-04, 9.74872029e-03, 6.10219785e-03, 1.73635589e-04],
+#         10: [1.03597373e-03, 8.68107533e-03, 7.27703871e-03, 1.01829601e-03, 3.27493977e-04,
+#              1.20005946e-02, 7.99650907e-06, 1.46295412e-02, 3.05741087e-03, 3.80251672e-03],
+#         15: [1.42315616e-03, 1.05462090e-02, 1.09413407e-02, 2.57800959e-03, 5.62285734e-03,
+#              9.52050022e-03, 5.54054485e-03, 1.51984579e-02, 4.32610621e-04, 6.49570287e-03],
+#     },
+#     "BayesSum": {
+#         5: [3.41480972e-05, 2.25149492e-05, 1.45841488e-04, 2.51880068e-06, 8.49946952e-06,
+#             2.33356808e-05, 2.03995727e-06, 1.58398211e-05, 2.44664033e-06, 6.33773609e-05],
+#         10: [1.31345453e-04, 3.38322736e-04, 1.25630877e-04, 3.24524426e-04, 6.76157720e-05,
+#              4.16162600e-04, 1.43796280e-04, 6.14573156e-04, 6.02121570e-05, 7.82360206e-04],
+#         15: [9.08454434e-04, 2.15210888e-03, 2.86778805e-03, 3.52999969e-03, 2.13046158e-03,
+#              6.84320681e-04, 9.40602877e-04, 7.16832566e-05, 9.97242303e-04, 1.78999419e-03],
+#     },
+#     "Active BayesSum": {
+#         5: [2.20436918e-06, 2.04733721e-06, 3.91577211e-06, 3.53205905e-06, 6.34696651e-06,
+#             2.76420486e-06, 2.46079382e-06, 2.28937861e-07, 1.53039999e-05, 9.76466477e-06],
+#         10: [1.36588159e-04, 1.32593100e-04, 1.27642270e-04, 1.09296333e-04, 4.19209910e-05,
+#              1.36949995e-04, 6.82333574e-05, 1.05065468e-04, 1.97872117e-04, 2.08293830e-04],
+#         15: [2.15650487e-04, 3.96974087e-04, 1.80159348e-04, 6.57238145e-04, 8.68516740e-04,
+#              3.62030438e-04, 3.78704875e-04, 1.37290209e-04, 3.80317304e-04, 2.15475960e-06],
+#     },
+# }
 
-    # {'MC': {8: Array([0.00201734, 0.00363845, 0.0041459 , 0.00186191, 0.00248067,
-    #    0.01238335, 0.00106262, 0.01151614, 0.00618625, 0.00246438],      dtype=float64), 12: Array([0.00023871, 0.00565949, 0.00863694, 0.00155495, 0.00225078,
-    #    0.01266229, 0.00390739, 0.01405321, 0.00534737, 0.00682812],      dtype=float64), 15: Array([0.00142316, 0.01054621, 0.01094134, 0.00257801, 0.00562286,
-    #    0.0095205 , 0.00554054, 0.01519846, 0.00043261, 0.0064957 ],      dtype=float64)}, 'BayesSum': {8: Array([8.33417233e-05, 1.35525033e-05, 3.53157169e-04, 2.76086512e-04,
-    #    1.99358120e-04, 2.27689553e-04, 2.72363417e-04, 1.75368016e-04,
-    #    3.55876371e-04, 2.09585653e-04], dtype=float64), 12: Array([1.95687380e-04, 2.28720955e-04, 9.61323899e-04, 6.39289291e-05,
-    #    4.02413659e-04, 8.51347228e-04, 2.81158846e-04, 1.12121312e-03,
-    #    1.46579235e-03, 7.27042260e-04], dtype=float64), 15: Array([0.00024794, 0.00217652, 0.00015591, 0.00207261, 0.00207785,
-    #    0.00060172, 0.00047103, 0.00207716, 0.0005035 , 0.00370006],      dtype=float64)}, 'Active BayesSum': {8: Array([5.93376129e-05, 1.15752441e-04, 1.34505147e-04, 1.28948940e-04,
-    #    4.92172172e-05, 3.35307919e-04, 2.97667556e-05, 6.40488832e-05,
-    #    5.69912382e-04, 2.91477122e-04], dtype=float64), 12: Array([9.72301337e-04, 4.78300020e-04, 2.31357977e-04, 4.04162255e-04,
-    #    2.66776818e-04, 2.60810947e-04, 1.47979652e-04, 8.63006002e-05,
-    #    3.99369828e-06, 2.64879047e-04], dtype=float64), 15: Array([6.10145860e-05, 9.43667114e-04, 3.39670902e-04, 1.88905926e-04,
-    #    2.43370210e-04, 3.17317888e-04, 1.17234978e-04, 3.40996420e-04,
-    #    1.09745879e-03, 3.72245370e-04], dtype=float64)}}
+#     d_list = [5, 10, 15]
+#     plot_abs_error_boxplots(
+#         rmses,
+#         d_list,
+#         methods=[label for _, label in methods],
+#         save_path="potts_abs_error_boxplot.pdf",
+#         logy=True,
+#         showfliers=True
+#     )
 
+    # # Calibration
+    # calibrations = {}
+    # calibration_seeds = 50
+    # n_calibration = 60
+    # key_seed = 5
+    # t_e, C_nom, emp_cov, mus, vars_= calibration(n_calibration, calibration_seeds, 0.005, d, q, beta, t_e, J, h, key_seed)
 
-
-    # Calibration
-    calibrations = {}
-    calibration_seeds = 200
-    n_calibration = 60
-    key_seed = 5
-    t_true, C_nom, emp_cov, mus, vars_ = calibration(n_calibration, calibration_seeds, 0.005, d, q, beta, t_e, J, h, key_seed)
-
-    jnp.savez("results/potts_calibration_results.npz",
-             t_true=t_true, C_nom=jnp.array(C_nom),
-             emp_cov=jnp.array(emp_cov),
-             mus=jnp.array(mus), vars=jnp.array(vars_))
-    print("potts_calibration.npz")
-
+    # jnp.savez("results/potts_calibration_results.npz",
+    #          t_true=t_e, C_nom=jnp.array(C_nom),
+    #          emp_cov=jnp.array(emp_cov),
+    #          mus=jnp.array(mus), vars=jnp.array(vars_))
+    # print("potts_calibration.npz")
 
 if __name__ == "__main__":
     main()

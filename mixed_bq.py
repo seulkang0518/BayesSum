@@ -2,7 +2,7 @@ import math
 import numpy as np
 from itertools import product
 import matplotlib.pyplot as plt
-
+    
 plt.rcParams['axes.grid'] = True
 plt.rcParams['font.family'] = 'DeJavu Serif'
 plt.rcParams['font.serif'] = ['Times New Roman']
@@ -21,41 +21,23 @@ import os
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as sla
-from jax.scipy.special import erf
-
+from jax.scipy.special import erf, erfinv
+from scipy.special import iv
 jax.config.update("jax_enable_x64", True)
 
 # ----------------------------
 # Ground Truth
 # ----------------------------
-# ---- exact series using modified Bessel I_n (scipy); fast & precise
 def _J1_series(k, L, N=80):
-    try:
-        from scipy.special import iv  # I_n
-    except Exception:
-        return _J1_numeric(k, L)  # fallback if scipy not available
-    if np.isclose(k, 0.0):
-        return np.exp(1.0)  # cos(0)=1 → E[e^{1}] = e
     s = np.i0(1.0)  # I_0(1)
-    # add 2/(kL) * sum_{n>=1} (I_n(1)/n) * sin(n k L)
     t = 0.0
     for n in range(1, N+1):
         t += (iv(n, 1.0)/n) * np.sin(n * k * L)
     return s + (2.0/(k*L)) * t
 
-# ---- numeric Gauss–Legendre fallback for J1 = (1/(2L)) ∫ e^{cos(kx)} dx
-def _J1_numeric(k, L, N=400):
-    from numpy.polynomial.legendre import leggauss
-    x, w = leggauss(N)                     # nodes/weights on [-1,1]
-    xs = 0.5*((2*L)*x + 0.0)               # map -> [-L, L]
-    vals = np.exp(np.cos(k * xs))
-    integral = 0.5*(2*L) * np.sum(w * vals)
-    return integral / (2.0*L)
-
 def ackley2c_truth_d1_exact(L, a=20.0, b=0.2, c=2.0*np.pi, levels=17):
     H = np.linspace(-1.0, 1.0, levels)
     total = 0.0
-    cache_J = {}
     for h1, h2 in product(H, H):
         alpha = 1.0 + 0.1*(h1 + h2)
         beta  = 1.0 + 0.05*(h1*h1 + h2*h2)
@@ -67,14 +49,25 @@ def ackley2c_truth_d1_exact(L, a=20.0, b=0.2, c=2.0*np.pi, levels=17):
         # term2 via J1
         kappa = c * beta
         key = float(np.round(kappa, 14))
-        if key not in cache_J:
-            cache_J[key] = _J1_series(kappa, L, N=80)
-        J1  = cache_J[key]
-        E2  = -J1
+        E2  = -1 * _J1_series(kappa, L, N=80)
 
         total += (E1 + E2 + a + np.e)
+        # total += (E1 + E2)
 
     return total / (levels**2)
+
+def ackley2c_truth_d1_mc_joint(L, key, levels=17, N=200_000):
+    kx, kh = jax.random.split(key)
+
+    X = jax.random.uniform(kx, (N, 1), minval=-L, maxval=L)  
+
+    levels_lin = jnp.linspace(-1.0, 1.0, levels)
+    i1 = jax.random.randint(kh, (N,), 0, levels)
+    i2 = jax.random.randint(kh, (N,), 0, levels)  
+    H = jnp.stack([levels_lin[i1], levels_lin[i2]], axis=1)  
+
+    fvals = v_ackley_2C(X, H)  
+    return float(jnp.mean(fvals))
 
 # ----------------------------
 # Ackley-2C integrand
@@ -91,6 +84,7 @@ def ackley_2C_single(x, h, a=20.0, b=0.2, c=2*math.pi):
     term1 = -a * jnp.exp(-b * jnp.sqrt(jnp.mean((alpha * x)**2)))
     term2 = -jnp.exp(jnp.mean(jnp.cos(c * beta * x)))
     return term1 + term2 + a + math.e
+    # return term1 + term2
 
 v_ackley_2C = jax.vmap(ackley_2C_single, in_axes=(0, 0))  
 
@@ -106,7 +100,7 @@ def rbf_kx(x, xp, ell):
 # ----------------------------
 def kc_equal_vec(h, hp):
     return jnp.all(h == hp, axis=-1).astype(jnp.float64)
-
+i
 def kc_exp_hamming_vec(h, hp, lambda_c):
     mismatches = jnp.sum(h != hp, axis=-1)   
     return jnp.exp(-lambda_c * mismatches).astype(jnp.float64)
@@ -175,9 +169,7 @@ def EhEh_kc_uniform_2c(cat, lambda_c, q=17):
 # ----------------------------
 # Build Gram and z for 2 categorical dims (uniform over 17x17 combos)
 # ----------------------------
-def build_gram_and_z_box_2c(
-    X, H, ell, L, kernel="product", ridge=1e-8, cat="equal", lambda_c=0.0, q=17
-):
+def build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q, ridge=1e-8):
     n = X.shape[0]
     if kernel == "product":
         kfun = lambda a, b: k_mixed_product_2c(a, b, ell, cat=cat, lambda_c=lambda_c)
@@ -206,10 +198,10 @@ def build_gram_and_z_box_2c(
 
     return K, z
 
-def mu_kk_2c(ell, L, d, kernel="product", cat="equal", lambda_c=0.0, q=17):
+def mu_kk_2c(ell, L, d, kernel, cat, lambda_c, q):
 
-    Ikxkx = rbf_kmean_uniform_box(ell, L, d)      # continuous part
-    Sc    = EhEh_kc_uniform_2c(cat=cat, lambda_c=lambda_c, q=q)  # categorical part
+    Ikxkx = rbf_kmean_uniform_box(ell, L, d)      
+    Sc    = EhEh_kc_uniform_2c(cat, lambda_c, q)  
     if kernel == "product":
         return Ikxkx * Sc
     else:
@@ -229,31 +221,31 @@ def bq_estimate_and_var(K, z, fvals, mu_kk):
 # ----------------------------
 # Designs, MC & RBQ helpers
 # ----------------------------
-def sample_levels(key, n, q=17):
+def sample_levels(key, n, q):
     levels = jnp.linspace(-1.0, 1.0, q)
     k1, k2 = jax.random.split(key)
     idx1 = jax.random.randint(k1, (n,), 0, q)
     idx2 = jax.random.randint(k2, (n,), 0, q)
     return levels[idx1], levels[idx2]  # (n,), (n,)
 
-def make_random_design(key, n, d, L, q=17):
+def make_random_design(key, n, d, L, q):
     kx, kh = jax.random.split(key)
     X = jax.random.uniform(kx, (n, d), minval=-L, maxval=L)
     h1, h2 = sample_levels(kh, n, q=q)
     H = jnp.stack([h1, h2], axis=1)  # (n,2)
     return X, H
 
-def mc_estimate_single(key, n, d, L, q=17):
-    X, H = make_random_design(key, n, d, L, q=q)
+def mc_estimate_single(key, n, d, L, q):
+    X, H = make_random_design(key, n, d, L, q)
     fvals = v_ackley_2C(X, H)
     return float(fvals.mean())
 
-def mc_estimate_repeated(base_key, n, d, L, q=17, reps=20, I_true=None):
+def mc_estimate_repeated(base_key, n, d, L, q, reps, I_true):
     errs = []
     k = base_key
     for _ in range(reps):
         k, kk = jax.random.split(k)
-        Ihat = mc_estimate_single(kk, n, d, L, q=q)
+        Ihat = mc_estimate_single(kk, n, d, L, q)
         if I_true is not None:
             errs.append(abs(Ihat - I_true))
         else:
@@ -265,20 +257,20 @@ def mc_estimate_repeated(base_key, n, d, L, q=17, reps=20, I_true=None):
         s = float(np.std(errs))
         return m, s, m
 
-def rbq_once(key, n, d, L, ell, kernel="product", cat="equal", lambda_c=0.0, ridge=1e-8, q=17):
-    X, H = make_random_design(key, n, d, L, q=q)
+def rbq_once(key, n, d, L, ell, kernel, cat, lambda_c, q):
+    X, H = make_random_design(key, n, d, L, q)
     fvals = v_ackley_2C(X, H)
-    K, z = build_gram_and_z_box_2c(X, H, ell, L, kernel=kernel, ridge=ridge, cat=cat, lambda_c=lambda_c, q=q)
-    mu_kk = mu_kk_2c(ell, L, d, kernel=kernel, cat=cat, lambda_c=lambda_c, q=q)
+    K, z = build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q)
+    mu_kk = mu_kk_2c(ell, L, d, kernel, cat, lambda_c, q)
     I_hat, Var, _ = bq_estimate_and_var(K, z, fvals, mu_kk)
     return float(I_hat), float(jnp.sqrt(jnp.maximum(Var, 0.0)))
 
-def rbq_repeated(base_key, n, d, L, ell, kernel="product", cat="equal", lambda_c=0.0, reps=20, q=17, I_true=None):
+def rbq_repeated(base_key, n, d, L, ell, kernel, cat, lambda_c, reps, q, I_true):
     errs, sds = [], []
     k = base_key
     for _ in range(reps):
         k, kk = jax.random.split(k)
-        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel=kernel, cat=cat, lambda_c=lambda_c, q=q)
+        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel, cat, lambda_c, q)
         if I_true is not None:
             errs.append(abs(Ihat - I_true))
         else:
@@ -292,7 +284,7 @@ def plot_results(n_vals, all_results, save_path="results", filename="ackley2c_ab
 
     styles = {
         "MC":         {"color": "k", "marker": "o", "label": "MC"},
-        "RBQ": {"color": "b", "marker": "s", "label": "BayesSum"},
+        "RBQ": {"color": "b", "marker": "s", "label": "BayesSum + BQ"},
     }
 
     plt.figure(figsize=(10, 6))
@@ -349,6 +341,28 @@ def load_results(filename):
         all_results[method][field] = val[0] if field == "true_val" else val
     return n_vals, all_results
 
+def calibration(n_calibration, seeds, key_seed, ell, lambda_, d, L, q, I_true, kernel, cat):
+    mus, stds = [], []
+    key = jax.random.PRNGKey(key_seed)
+
+    for s in range(seeds):
+        key, subkey = jax.random.split(key)
+        mu, std = rbq_once(subkey, n_calibration, d, L, ell, kernel, cat, lambda_, q)
+        mus.append(mu)
+        stds.append(std)
+
+    mus  = jnp.array(mus)
+    stds = jnp.maximum(jnp.array(stds), 1e-30)
+
+    C_nom = jnp.concatenate([jnp.array([0.0]), jnp.linspace(0.05, 0.99, 20)])
+    z = jnp.sqrt(2.0) * erfinv(C_nom)
+
+    half = z[:, None] * stds[None, :]
+    inside = (I_true >= mus[None, :] - half) & (I_true <= mus[None, :] + half)
+    emp_cov = jnp.mean(inside, axis=1)
+
+    return float(I_true), C_nom, emp_cov, mus, stds
+
 # ----------------------------
 # Demo / Experiment
 # ----------------------------
@@ -358,61 +372,70 @@ if __name__ == "__main__":
     # settings
     d        = 1
     L        = 1.0
-    ell      = 0.32
-    ridge    = 1e-8
-    qcat     = 17
+    ell      = 0.8
+    q     = 17
     ns       = [20, 40, 60, 80, 100]
-    reps_mc  = 10
-    reps_rbq = 10
+    seeds  = 10
 
+    kernel = "shared"
     cat      = "exp"
-    lambda_c = 0.1   # only used if cat="exp"
+    lambda_c = 1.0   # only used if cat="exp"
 
     I_true = ackley2c_truth_d1_exact(L)
-    print(f"Large-MC truth (approx): I_true = {I_true:+.8f}")
+    I_true_mc   = ackley2c_truth_d1_mc_joint(L, jax.random.PRNGKey(42), q, 300_000)
+    print(f"Large-MC ground truth: I_true = {I_true:+.8f}")
+    print(f"Large-MC truth (approx): I_true = {I_true_mc:+.8f}")
+    # # storage
+    # err_mc_mean,    err_mc_std    = [], []
+    # err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
 
-    # storage
-    err_mc_mean,    err_mc_std    = [], []
-    err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
+    # for n in ns:
+    #     # RBQ (randomized designs, mean±sd over reps)
+    #     m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, cat, lambda_c, seeds, q, I_true)
+    #     err_rbq_shr_m.append(m_e_s)
+    #     err_rbq_shr_s.append(s_e_s)
+    #     sd_rbq_shr_m.append(m_sd_s)
 
-    for n in ns:
-        # RBQ (randomized designs, mean±sd over reps)
-        m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(
-            jax.random.PRNGKey(8000 + n), n, d, L, ell,
-            kernel="shared", cat=cat, lambda_c=lambda_c, reps=reps_rbq, q=qcat, I_true=I_true
-        )
-        err_rbq_shr_m.append(m_e_s)
-        err_rbq_shr_s.append(s_e_s)
-        sd_rbq_shr_m.append(m_sd_s)
+    #     # MC baseline (mean±sd over reps)
+    #     mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true)
+    #     err_mc_mean.append(mc_mean_err)
+    #     err_mc_std.append(mc_std_err)
 
-        # MC baseline (mean±sd over reps)
-        mc_mean_err, mc_std_err, _ = mc_estimate_repeated(
-            jax.random.PRNGKey(9000 + n), n, d, L, q=qcat, reps=reps_mc, I_true=I_true
-        )
-        err_mc_mean.append(mc_mean_err)
-        err_mc_std.append(mc_std_err)
+    #     print(
+    #         f"n={n:3d} | "
+    #         f"RBQ_shared[{cat}]: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
+    #         f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
+    #     )
 
-        print(
-            f"n={n:3d} | "
-            f"RBQ_shared[{cat}]: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
-            f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
-        )
+    # # Package results for the new plotting helper.
+    # # Convert (std across reps) -> standard error for 95% CIs: se = std / sqrt(reps)
+    # all_results = {
+    #     "RBQ": {
+    #         "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
+    #         "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(seeds),
+    #     },
+    #     "MC": {
+    #         "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
+    #         "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(seeds),
+    #     },
+    # }
 
-    # Package results for the new plotting helper.
-    # Convert (std across reps) -> standard error for 95% CIs: se = std / sqrt(reps)
-    all_results = {
-        "RBQ": {
-            "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
-            "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(reps_rbq),
-        },
-        "MC": {
-            "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
-            "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(reps_mc),
-        },
-    }
+    # save_results("mixed.npz", ns, all_results)
+    # n_vals, all_results = load_results("mixed.npz")
+    # print(all_results)
 
-    save_results("mixed.npz", ns, all_results)
-    n_vals, all_results = load_results("mixed.npz")
-    print(all_results)
+    # plot_results(ns, all_results, save_path="results", filename="ackley2c_abs_err.pdf")
 
-    plot_results(ns, all_results, save_path="results", filename="ackley2c_abs_err.pdf")
+
+    # # Calibration
+    # calibrations = {}
+    # calibration_seeds = 50
+    # n_calibration = 60
+    # key_seed = 5
+    # t_e, C_nom, emp_cov, mus, stds = calibration(n_calibration, calibration_seeds, key_seed, ell, lambda_c, d, L, q, I_true, "shared", cat)
+
+    # jnp.savez("results/mixed_calibration_results.npz",
+    #          t_true=t_e, C_nom=jnp.array(C_nom),
+    #          emp_cov=jnp.array(emp_cov),
+    #          mus=jnp.array(mus), vars=jnp.array(stds))
+    # print("mixed_calibration.npz")

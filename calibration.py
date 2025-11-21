@@ -143,9 +143,9 @@ def load_calibration_npz(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Not found: {path}")
     data = np.load(path, allow_pickle=True)
-    C_nom   = data.get("C_nom")
-    emp_cov = data.get("emp_cov")
-    t_true  = data.get("t_true")
+    C_nom   = data["C_nom"]
+    emp_cov = data["emp_cov"]
+    t_true  = data["t_true"]
     if C_nom is None or emp_cov is None:
         raise KeyError(f"File {path} missing C_nom/emp_cov")
     return {
@@ -185,14 +185,14 @@ def plot_calibration_comparison(
     # Ideal diagonal
     plt.plot([0, 1], [0, 1], "k--", linewidth=1.2, label="Ideal")
 
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
+    plt.xlabel(xlabel, fontsize=32)
+    plt.ylabel(ylabel, fontsize=32)
     plt.grid(True, ls="--", alpha=0.5)
-
+    plt.title("Calibration", fontsize=32)
     # --- CHANGE: Add legend directly to the plot ---
     # The legend will use the labels provided in the plot() calls.
     # 'loc' places it in the lower right corner, a common spot for calibration plots.
-    plt.legend(loc="lower right")
+    plt.legend(loc="lower right", fontsize=32)
 
     plt.tight_layout()
     plt.savefig(main_png, dpi=300)
@@ -230,8 +230,10 @@ if __name__ == "__main__":
     # Filenames inside ./results — adjust if different
     files = {
         "Poisson":   os.path.join(data_dir, "poisson_calibration_results.npz"),
-        "Ising":   os.path.join(data_dir, "ising_calibration_results.npz"),
-        "Potts":   os.path.join(data_dir, "potts_calibration_results.npz"),
+        "Potts":   os.path.join(data_dir, "unnormalised_potts_g_calibration_results.npz"),
+        # "Potts (MH)":   os.path.join(data_dir, "unnormalised_potts_mh_calibration_results.npz"),
+        "Uniform":   os.path.join(data_dir, "potts_calibration_results.npz"),
+        "Mixed":   os.path.join(data_dir, "mixed_calibration_results.npz"),
     }
 
     # Load data
