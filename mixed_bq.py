@@ -56,19 +56,6 @@ def ackley2c_truth_d1_exact(L, a=20.0, b=0.2, c=2.0*np.pi, levels=17):
 
     return total / (levels**2)
 
-def ackley2c_truth_d1_mc_joint(L, key, levels=17, N=200_000):
-    kx, kh = jax.random.split(key)
-
-    X = jax.random.uniform(kx, (N, 1), minval=-L, maxval=L)  
-
-    levels_lin = jnp.linspace(-1.0, 1.0, levels)
-    i1 = jax.random.randint(kh, (N,), 0, levels)
-    i2 = jax.random.randint(kh, (N,), 0, levels)  
-    H = jnp.stack([levels_lin[i1], levels_lin[i2]], axis=1)  
-
-    fvals = v_ackley_2C(X, H)  
-    return float(jnp.mean(fvals))
-
 # ----------------------------
 # Ackley-2C integrand
 # ----------------------------
@@ -89,18 +76,15 @@ def ackley_2C_single(x, h, a=20.0, b=0.2, c=2*math.pi):
 v_ackley_2C = jax.vmap(ackley_2C_single, in_axes=(0, 0))  
 
 # ----------------------------
-# RBF kernel on R^d (continuous)
+# RBF kernel on continuous variable
 # ----------------------------
 def rbf_kx(x, xp, ell):
     diff = x - xp
     return jnp.exp(-0.5 * jnp.sum(diff * diff, axis=-1) / (ell**2))
 
 # ----------------------------
-# Categorical kernels on 2-D categorical vectors
+# Exp-Hamming kernels on 2-D categorical vectors
 # ----------------------------
-def kc_equal_vec(h, hp):
-    return jnp.all(h == hp, axis=-1).astype(jnp.float64)
-i
 def kc_exp_hamming_vec(h, hp, lambda_c):
     mismatches = jnp.sum(h != hp, axis=-1)   
     return jnp.exp(-lambda_c * mismatches).astype(jnp.float64)
@@ -108,24 +92,18 @@ def kc_exp_hamming_vec(h, hp, lambda_c):
 # ----------------------------
 # Mixed kernels
 # ----------------------------
-def k_mixed_product_2c(xh, xhp, ell, cat="equal", lambda_c=0.0):
+def k_mixed_product_2c(xh, xhp, ell, lambda_c=0.0):
     x,  h  = xh
     xp, hp = xhp
     kx = rbf_kx(x, xp, ell)
-    if cat == "equal":
-        kc = kc_equal_vec(h, hp)
-    else:
-        kc = kc_exp_hamming_vec(h, hp, lambda_c)
+    kc = kc_exp_hamming_vec(h, hp, lambda_c)
     return kx * kc
 
-def k_mixed_shared_2c(xh, xhp, ell, cat="equal", lambda_c=0.0):
+def k_mixed_shared_2c(xh, xhp, ell, lambda_c=0.0):
     x,  h  = xh
     xp, hp = xhp
     kx = rbf_kx(x, xp, ell)
-    if cat == "equal":
-        kc = kc_equal_vec(h, hp)
-    else:
-        kc = kc_exp_hamming_vec(h, hp, lambda_c)
+    kc = kc_exp_hamming_vec(h, hp, lambda_c)
     return kx + kc + kx * kc
 
 # ----------------------------
@@ -135,8 +113,7 @@ def k_mixed_shared_2c(xh, xhp, ell, cat="equal", lambda_c=0.0):
 def rbf_kme_uniform_1d(xp_scalar, ell, L):
     s2 = jnp.sqrt(2.0) * ell
     return (jnp.sqrt(jnp.pi / 2.0) * ell / (2.0 * L)) * (
-        erf((L - xp_scalar) / s2) + erf((L + xp_scalar) / s2)
-    )
+        erf((L - xp_scalar) / s2) + erf((L + xp_scalar) / s2))
 
 def rbf_kme_uniform_box(Xp, ell, L):
     def per_row(xrow):
@@ -157,24 +134,21 @@ def rbf_kmean_uniform_box(ell, L, d):
 # ----------------------------
 # Expected categorical factors under uniform prior over 17x17 combos
 # ----------------------------
-def Eh_kc_uniform_2c(cat, lambda_c, q=17):
-    if cat == "equal":
-        return (1.0 / q) ** 2
-    else:
-        return ((1.0 + (q - 1.0) * jnp.exp(-lambda_c)) / q) ** 2
+def Eh_kc_uniform_2c(lambda_c, q=17):
+    return ((1.0 + (q - 1.0) * jnp.exp(-lambda_c)) / q) ** 2 ## 2 categorical variables
 
-def EhEh_kc_uniform_2c(cat, lambda_c, q=17):
-    return Eh_kc_uniform_2c(cat=cat, lambda_c=lambda_c, q=q)
+def EhEh_kc_uniform_2c(lambda_c, q=17):
+    return Eh_kc_uniform_2c(lambda_c=lambda_c, q=q)
 
 # ----------------------------
 # Build Gram and z for 2 categorical dims (uniform over 17x17 combos)
 # ----------------------------
-def build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q, ridge=1e-8):
+def build_gram_and_z_box_2c(X, H, ell, L, kernel, lambda_c, q, ridge=1e-8):
     n = X.shape[0]
     if kernel == "product":
-        kfun = lambda a, b: k_mixed_product_2c(a, b, ell, cat=cat, lambda_c=lambda_c)
+        kfun = lambda a, b: k_mixed_product_2c(a, b, ell, lambda_c=lambda_c)
     else:
-        kfun = lambda a, b: k_mixed_shared_2c(a, b, ell, cat=cat, lambda_c=lambda_c)
+        kfun = lambda a, b: k_mixed_shared_2c(a, b, ell, lambda_c=lambda_c)
 
     def row(i):
         xi, hi = X[i], H[i]
@@ -187,7 +161,7 @@ def build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q, ridge=1e-8):
     mx = rbf_kme_uniform_box(X, ell, L)  # (n,)
 
     # categorical expectation (uniform prior) -- same scalar for all i
-    Ehkc = Eh_kc_uniform_2c(cat=cat, lambda_c=lambda_c, q=q)
+    Ehkc = Eh_kc_uniform_2c(lambda_c=lambda_c, q=q)
 
     if kernel == "product":
         # z_i = E[kx] * E[kc] = m_x(x_i) * Eh[kc]
@@ -198,10 +172,10 @@ def build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q, ridge=1e-8):
 
     return K, z
 
-def mu_kk_2c(ell, L, d, kernel, cat, lambda_c, q):
+def mu_kk_2c(ell, L, d, kernel, lambda_c, q):
 
     Ikxkx = rbf_kmean_uniform_box(ell, L, d)      
-    Sc    = EhEh_kc_uniform_2c(cat, lambda_c, q)  
+    Sc    = EhEh_kc_uniform_2c(lambda_c, q)  
     if kernel == "product":
         return Ikxkx * Sc
     else:
@@ -257,20 +231,20 @@ def mc_estimate_repeated(base_key, n, d, L, q, reps, I_true):
         s = float(np.std(errs))
         return m, s, m
 
-def rbq_once(key, n, d, L, ell, kernel, cat, lambda_c, q):
+def rbq_once(key, n, d, L, ell, kernel, lambda_c, q):
     X, H = make_random_design(key, n, d, L, q)
     fvals = v_ackley_2C(X, H)
-    K, z = build_gram_and_z_box_2c(X, H, ell, L, kernel, cat, lambda_c, q)
-    mu_kk = mu_kk_2c(ell, L, d, kernel, cat, lambda_c, q)
+    K, z = build_gram_and_z_box_2c(X, H, ell, L, kernel, lambda_c, q)
+    mu_kk = mu_kk_2c(ell, L, d, kernel, lambda_c, q)
     I_hat, Var, _ = bq_estimate_and_var(K, z, fvals, mu_kk)
     return float(I_hat), float(jnp.sqrt(jnp.maximum(Var, 0.0)))
 
-def rbq_repeated(base_key, n, d, L, ell, kernel, cat, lambda_c, reps, q, I_true):
+def rbq_repeated(base_key, n, d, L, ell, kernel, lambda_c, reps, q, I_true):
     errs, sds = [], []
     k = base_key
     for _ in range(reps):
         k, kk = jax.random.split(k)
-        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel, cat, lambda_c, q)
+        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel, lambda_c, q)
         if I_true is not None:
             errs.append(abs(Ihat - I_true))
         else:
@@ -341,13 +315,13 @@ def load_results(filename):
         all_results[method][field] = val[0] if field == "true_val" else val
     return n_vals, all_results
 
-def calibration(n_calibration, seeds, key_seed, ell, lambda_, d, L, q, I_true, kernel, cat):
+def calibration(n_calibration, seeds, key_seed, ell, lambda_, d, L, q, I_true, kernel):
     mus, stds = [], []
     key = jax.random.PRNGKey(key_seed)
 
     for s in range(seeds):
         key, subkey = jax.random.split(key)
-        mu, std = rbq_once(subkey, n_calibration, d, L, ell, kernel, cat, lambda_, q)
+        mu, std = rbq_once(subkey, n_calibration, d, L, ell, kernel, lambda_, q)
         mus.append(mu)
         stds.append(std)
 
@@ -378,64 +352,62 @@ if __name__ == "__main__":
     seeds  = 10
 
     kernel = "shared"
-    cat      = "exp"
-    lambda_c = 1.0   # only used if cat="exp"
+    lambda_c = 1.0   
 
     I_true = ackley2c_truth_d1_exact(L)
-    I_true_mc   = ackley2c_truth_d1_mc_joint(L, jax.random.PRNGKey(42), q, 300_000)
     print(f"Large-MC ground truth: I_true = {I_true:+.8f}")
-    print(f"Large-MC truth (approx): I_true = {I_true_mc:+.8f}")
-    # # storage
-    # err_mc_mean,    err_mc_std    = [], []
-    # err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
+    
+    # storage
+    err_mc_mean,    err_mc_std    = [], []
+    err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
 
-    # for n in ns:
-    #     # RBQ (randomized designs, mean±sd over reps)
-    #     m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, cat, lambda_c, seeds, q, I_true)
-    #     err_rbq_shr_m.append(m_e_s)
-    #     err_rbq_shr_s.append(s_e_s)
-    #     sd_rbq_shr_m.append(m_sd_s)
+    for n in ns:
+        # RBQ (randomized designs, mean±sd over reps)
+        m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, lambda_c, seeds, q, I_true)
+        err_rbq_shr_m.append(m_e_s)
+        err_rbq_shr_s.append(s_e_s)
+        sd_rbq_shr_m.append(m_sd_s)
 
-    #     # MC baseline (mean±sd over reps)
-    #     mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true)
-    #     err_mc_mean.append(mc_mean_err)
-    #     err_mc_std.append(mc_std_err)
+        # MC baseline (mean±sd over reps)
+        mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true)
+        err_mc_mean.append(mc_mean_err)
+        err_mc_std.append(mc_std_err)
 
-    #     print(
-    #         f"n={n:3d} | "
-    #         f"RBQ_shared[{cat}]: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
-    #         f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
-    #     )
+        print(
+            f"n={n:3d} | "
+            f"RBQ_shared: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
+            f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
+        )
 
-    # # Package results for the new plotting helper.
-    # # Convert (std across reps) -> standard error for 95% CIs: se = std / sqrt(reps)
-    # all_results = {
-    #     "RBQ": {
-    #         "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
-    #         "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(seeds),
-    #     },
-    #     "MC": {
-    #         "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
-    #         "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(seeds),
-    #     },
-    # }
+    # Package results for the new plotting helper.
+    # Convert (std across reps) -> standard error for 95% CIs: se = std / sqrt(reps)
+    all_results = {
+        "RBQ": {
+            "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
+            "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(seeds),
+        },
+        "MC": {
+            "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
+            "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(seeds),
+        },
+    }
 
-    # save_results("mixed.npz", ns, all_results)
-    # n_vals, all_results = load_results("mixed.npz")
-    # print(all_results)
+    save_results("mixed.npz", ns, all_results)
+    n_vals, all_results = load_results("mixed.npz")
+    print(all_results)
 
-    # plot_results(ns, all_results, save_path="results", filename="ackley2c_abs_err.pdf")
+    plot_results(ns, all_results, save_path="results", filename="ackley2c_abs_err.pdf")
 
 
-    # # Calibration
-    # calibrations = {}
-    # calibration_seeds = 50
-    # n_calibration = 60
-    # key_seed = 5
-    # t_e, C_nom, emp_cov, mus, stds = calibration(n_calibration, calibration_seeds, key_seed, ell, lambda_c, d, L, q, I_true, "shared", cat)
+    # Calibration
+    calibrations = {}
+    calibration_seeds = 50
+    n_calibration = 60
+    key_seed = 5
+    t_e, C_nom, emp_cov, mus, stds = calibration(n_calibration, calibration_seeds, key_seed, ell, lambda_c, d, L, q, I_true, "shared")
 
-    # jnp.savez("results/mixed_calibration_results.npz",
-    #          t_true=t_e, C_nom=jnp.array(C_nom),
-    #          emp_cov=jnp.array(emp_cov),
-    #          mus=jnp.array(mus), vars=jnp.array(stds))
-    # print("mixed_calibration.npz")
+    jnp.savez("results/mixed_calibration_results.npz",
+             t_true=t_e, C_nom=jnp.array(C_nom),
+             emp_cov=jnp.array(emp_cov),
+             mus=jnp.array(mus), vars=jnp.array(stds))
+    print("mixed_calibration.npz")
