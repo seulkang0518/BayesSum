@@ -1,1 +1,1 @@
-# kernel-methods
+# BayesSum
