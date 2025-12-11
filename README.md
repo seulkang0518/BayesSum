@@ -11,7 +11,8 @@ pip3 install -r requirements.txt
 1. Synthetic Data
    To reproduce the results for the synthetic experiment Figure 1 and Figure 2(Left), run the following files:
   - Poisson: `python3 poisson.py`
-  - Uniform: `python3 potts.py`
+  - Uniform: `python3 potts.py --figure uniform` (Figure 1) `python3 potts.py --figure slope` (Table of convergence rate) `python3 potts.py --figure dim_boxplot` (Figure 2 Right), 
+    `python3 potts.py --figure lambda_ablation` (Figure 2 Left)
   - Potts model: `python3 unnormalised_potts.py`
   - Mixed space: `python3 mixed_bq.py`
     
