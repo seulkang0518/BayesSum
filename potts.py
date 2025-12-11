@@ -29,11 +29,12 @@ plt.rc('figure', figsize=(6, 4), dpi=100)
 import time
 from functools import lru_cache
 from jax.scipy.stats import norm
-import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import os
 import matplotlib as mpl
 import numpy as np
 import matplotlib.patches as mpatches
+import argparse
 
 jax.config.update("jax_enable_x64", True)
 
@@ -339,6 +340,8 @@ def run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_t
 
             if experiment_type == "bq_random":
                 X = sample_uniform(key_random, int(n), d, q)
+                # a = len(X)
+                # b = jnp.unique(X, axis = 0)
                 f_vals = f_batch(X, J, h, beta).reshape(-1, 1)     # (n,1)
                 w = precompute_bc_weights(X, lambda_, d, q)     # (n,1)
                 est_mean = (w.T @ f_vals)[0, 0]
@@ -366,7 +369,7 @@ def run_experiment(n_vals, lambda_, d, q, seed, beta, J, h, t_true, experiment_t
         times.append(elapsed)
         # print(f"n={int(n):5d} | {experiment_type.upper():9s} | time {elapsed:.3f}s | err={float(jnp.abs(est_mean - t_true)):.6e}")
 
-    return {"true_val": t_true * (q**d), "est_means": jnp.array(est_means) * (q**d), "times": jnp.array(times)}
+    return {"true_val": t_true, "est_means": jnp.array(est_means), "times": jnp.array(times)}
 
 def run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_true, experiment_type, sub_sample):
     """
@@ -422,16 +425,23 @@ def format_log_label(n):
     else:
         return r"${} \times 10^{{{}}}$".format(m_str, e)
 
-def plot_results(n_vals, all_results, save_path="results"):
+def plot_results(n_vals, all_results, unique, filename, save_path="results"):
     os.makedirs(save_path, exist_ok=True)
-    styles = {
-        'MC': {'color': 'k', 'marker': 'o', 'label': 'MC'},
-        'SS': {'color': 'c', 'marker': '^', 'label': 'SS'},
-        'BayesSum': {'color': 'b', 'marker': 's', 'label': 'DBQ'},
-        'Active BayesSum': {'color': 'g', 'marker': '^', 'label': 'Active DBQ'},
-        'RR': {'color': 'r', 'marker': 'D', 'label': 'RR'},
-        'IS': {'color': '#A52A2A', 'marker': 'o', 'label': 'IS'},
-    }
+
+    if unique:
+        styles = {
+            'MC': {'color': 'k', 'marker': 'o', 'label': 'MC', 'linestyle': '-'},
+            'SS': {'color': 'c', 'marker': '^', 'label': 'SS', 'linestyle': '-'},
+            'BayesSum': {'color': 'b', 'marker': 's', 'label': 'DBQ', 'linestyle': '-'},
+            'Active BayesSum': {'color': 'g', 'marker': '^', 'label': 'Active DBQ', 'linestyle': '-'},
+            'RR': {'color': 'r', 'marker': 'D', 'label': 'RR', 'linestyle': '-'},
+            'IS': {'color': '#A52A2A', 'marker': 'o', 'label': 'IS', 'linestyle': '-'},
+        }
+    else:
+        styles = {
+            'BayesSum': {'color': 'blue', 'marker': 'D', 'label': 'BayesSum', 'linestyle': '-'},
+            'BayesSum (IID)': {'color': 'blue', 'marker': 'D', 'label': 'BayesSum (IID)', 'linestyle': '--'}
+        }
 
     plt.figure(figsize=(10, 6))
     handles, labels = [], []
@@ -475,13 +485,42 @@ def plot_results(n_vals, all_results, save_path="results"):
 
     plt.grid(True, which='major', linestyle='--', linewidth=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, "potts_abs_err.pdf"), format='pdf')
+    plt.savefig(os.path.join(save_path, filename), format='pdf')
     plt.close()
 
-    fig_legend, ax_legend = plt.subplots(figsize=(6, 1))
+    fig_legend, ax_legend = plt.subplots(figsize=(2, 1))
     ax_legend.axis('off')
-    ax_legend.legend(handles, labels, ncol=4, loc='center', fontsize=26, frameon=False)
-    plt.savefig(os.path.join(save_path, "potts_abs_err_legend.pdf"), bbox_inches='tight')
+
+    legend_handles = []
+    legend_labels  = []
+
+    for name in styles:
+        st = styles[name]
+        h = Line2D(
+            [0], [0],
+            color=st['color'],
+            linestyle=st['linestyle'],   # <--- DIFFERENT FOR EACH METHOD
+            marker=st['marker'],
+            markersize=10,
+            label=st['label']
+        )
+        legend_handles.append(h)
+        legend_labels.append(st['label'])
+
+    ax_legend.legend(
+        legend_handles,
+        legend_labels,
+        ncol=len(styles.keys()),
+        loc='center',
+        fontsize=16,
+        frameon=False
+    )
+
+    if not unique:
+        plt.savefig(os.path.join(save_path, "potts_unique_vs_iid_legend.pdf"), bbox_inches='tight')
+    else:
+        plt.savefig(os.path.join(save_path, "abs_error_potts_legend.pdf"), bbox_inches='tight')
+
     plt.close(fig_legend)
 
 
@@ -690,7 +729,7 @@ def plot_abs_error_boxplots(
     print(f"Saved {save_path}")
 
 def plot_lambda_boxplot(result_dict, n_show=10, logy=True,
-                        save_path="potts_ablation_boxplot.pdf"):
+                        save_path="results/potts_ablation_boxplot.pdf"):
     lam_grid = np.array(result_dict["lambda"])
     ERR = np.array(result_dict["ERR"])  # shape (seeds, lam_num)
     ERR = np.abs(ERR)
@@ -740,7 +779,7 @@ def plot_lambda_boxplot(result_dict, n_show=10, logy=True,
     plt.title("Uniform: Lengthscale Ablation", fontsize=32)
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
+    plt.savefig(os.path.join("results", "potts_ablation_boxplot.pdf"), bbox_inches='tight')
     plt.close()
     print(f"Saved {save_path}")
 
@@ -758,21 +797,266 @@ def estimate_alpha(N, MAE, min_index=1):
     return alpha, a, b
 
 
+# =========================
+# Figure generators
+# =========================
+
+POTTS_RESULTS_FILE = "potts.npz"
+
+def ensure_uniform_results():
+    """
+    Make sure POTTS_RESULTS_FILE exists.
+    If not, run the experiments and save it.
+    """
+
+    if os.path.exists(POTTS_RESULTS_FILE):
+        print(f"Found {POTTS_RESULTS_FILE}, reusing it.")
+        return
+
+    print(f"{POTTS_RESULTS_FILE} not found. Running experiments to create it...")
+
+    # ---- set up parameters exactly as in your original main() ----
+    k_b = 1
+    T_c = 2.269
+    beta = 1 / T_c
+    d = 15
+    q = 3
+    n_vals = jnp.array([8, 28, 84, 220, 1000])
+    num_seeds = int(50)
+    sub_sample = 2000
+
+    alpha, gamma = 1.0, 0.0
+    h = h_chain(d, q)
+    J = J_chain(d, q, alpha, gamma)
+
+    # true expectation (per-state)
+    t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ=False)
+    print("True Z:", float(t_e * (q**d)))
+
+    # lengthscale ablation (or hard-code lambda_ if you prefer)
+    lam_start, lam_end, lam_num = 0.001, 10, 50
+    seeds_ablation = 50
+    n_ablation = 400
+    ablation = lengthscale_ablation(
+        d, q, n_ablation,
+        lam_start, lam_end, lam_num,
+        seeds_ablation,
+        t_e, J, h, beta,
+        key_seed=0,
+        experiment_type="bq_random",
+        sub_sample=None,
+    )
+    lambda_ = ablation["lambda_star"]
+    print("Chosen lambda* =", float(lambda_))
+
+    results = {
+        "Active BayesSum": run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_bo", sub_sample),
+        "BayesSum":        run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "bq_random", sub_sample),
+        "MC":              run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "mc", sub_sample),
+        "RR":              run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "rr", sub_sample),
+        "SS":              run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "strat", sub_sample),
+        "IS":              run_multiple_seeds(n_vals, lambda_, d, q, num_seeds, beta, J, h, t_e, "is", sub_sample),
+    }
+
+    results["BayesSum (IID)"] = results["BayesSum"]
+
+    save_results_portable(POTTS_RESULTS_FILE, n_vals, results)
+
+def generate_uniform_abs_error():
+    """
+    Figure: potts_abs_err.pdf + potts_abs_err_legend.pdf
+    """
+    ensure_uniform_results()
+    n_vals, all_results = load_results_portable(POTTS_RESULTS_FILE)
+    plot_results(n_vals, all_results, True, "potts_abs_err.pdf")
+
+
+def generate_comparison_unique_vs_iid():
+    """
+    Figure: potts_abs_err_iid_vs_unique.pdf
+    """
+    ensure_uniform_results()
+    n_vals, all_results = load_results_portable(POTTS_RESULTS_FILE)
+    plot_results(n_vals, all_results, False, "potts_abs_err_iid_vs_unique.pdf")
+
+
+def generate_slope_table():
+    """
+    Prints alpha exponents for each method.
+    """
+    ensure_uniform_results()
+    n_vals, all_results = load_results_portable(POTTS_RESULTS_FILE)
+    methods = ["MC", "BayesSum", "Active BayesSum", "RR", "SS", "IS"]
+    for m in methods:
+        alpha, a, b = estimate_alpha(n_vals, all_results[m]["mean_abs_error"], min_index=1)
+        print(f"{m}: α ≈ {alpha:.3f}")
+
+
+def generate_lengthscale_ablation():
+    """
+    Figure: potts_ablation_boxplot.pdf
+    """
+    d = 15
+    q = 3
+    k_b = 1
+    T_c = 2.269
+    beta = 1 / T_c
+    alpha, gamma = 1.0, 0.0
+
+    h = h_chain(d, q)
+    J = J_chain(d, q, alpha, gamma)
+    t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ=False)
+
+    lam_start, lam_end, lam_num = 0.001, 10, 50
+    seeds_ablation = 50
+    n_ablation = 400
+
+    result = lengthscale_ablation(
+        d, q, n_ablation,
+        lam_start, lam_end, lam_num,
+        seeds_ablation,
+        t_e,
+        J, h, beta,
+        key_seed=0,
+        experiment_type="bq_random",
+        sub_sample=None
+    )
+
+    plot_lambda_boxplot(result, save_path="potts_ablation_boxplot.pdf")
+
+
+def generate_calibration():
+    """
+    Saves calibration npz; you can have a separate script to plot it.
+    """
+    d = 15
+    q = 3
+    k_b = 1
+    T_c = 2.269
+    beta = 1 / T_c
+    alpha, gamma = 1.0, 0.0
+    lambda_ = 0.005
+
+    h = h_chain(d, q)
+    J = J_chain(d, q, alpha, gamma)
+    t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ=False)
+
+    calibration_seeds = 50
+    n_calibration = 60
+    key_seed = 5
+    t_true, C_nom, emp_cov, mus, vars_ = calibration(
+        n_calibration, calibration_seeds,
+        lambda_,
+        d=d, q=q, beta=beta,
+        t_e=t_e, J=J, h=h,
+        key_seed=key_seed
+    )
+
+    os.makedirs("results", exist_ok=True)
+    jnp.savez(
+        "results/potts_calibration_results.npz",
+        t_true=t_true,
+        C_nom=jnp.array(C_nom),
+        emp_cov=jnp.array(emp_cov),
+        mus=jnp.array(mus),
+        vars=jnp.array(vars_),
+    )
+    print("Saved results/potts_calibration_results.npz")
+
+def generate_dimension_boxplot():
+    """
+    Figure: potts_abs_error_boxplot.pdf
+    """
+    d_list = [5, 10, 15]
+    q = 3
+    k_b = 1
+    T_c = 2.269
+    beta = 1 / T_c
+    alpha, gamma = 1.0, 0.0
+
+    lam_start, lam_end, lam_num = 0.001, 10, 50
+    seeds_ablation = 50
+    n_ablation = 400
+
+    methods = [("mc", "MC"), ("bq_random", "BayesSum"), ("bq_bo", "Active BayesSum")]
+    rmses = {label: {} for _, label in methods}
+    bq_lambda_stars = {}
+
+    for d in d_list:
+
+        h = h_chain(d, q)
+        J = J_chain(d, q, alpha, gamma)
+        t_e = true_expectation(q, d, beta, J, h, batch=200_000, return_logZ = False)
+        print(t_e)
+
+        bq_ablation = lengthscale_ablation(d, q, n_ablation, lam_start, lam_end, lam_num, seeds_ablation, t_e, J, h, beta, d, "bq_random", None)
+        bq_lambda_star = bq_ablation["lambda_star"]
+        bq_lambda_stars[d] = bq_lambda_star
+
+        mc_results = run_multiple_seeds([n_ablation], 0.0, d, q, seeds_ablation, beta, J, h, t_e, "mc", None)
+        rmses["MC"][d] = mc_results["abs_errors"][:, 0]
+
+        dbq_results = run_multiple_seeds([n_ablation], bq_lambda_star, d, q, seeds_ablation, beta, J, h, t_e, "bq_random", None)
+        rmses["BayesSum"][d] = dbq_results["abs_errors"][:, 0]
+
+        abq_results = run_multiple_seeds([n_ablation], bq_lambda_star, d, q, seeds_ablation, beta, J, h, t_e, "bq_bo", sub_sample)
+        rmses["Active BayesSum"][d] = abq_results["abs_errors"][:, 0]
+
+    # lambda_stars = [0.004558104601977957, 0.004558104601977957, 0.028593018398391068]
+
+    # print(rmses)
+    #     rmses = {
+#     "MC": {
+#         5: [2.54166095e-04, 7.07450705e-03, 8.04885205e-03, 6.93353856e-03, 2.47596441e-03,
+#             1.49401660e-02, 9.29559119e-04, 9.74872029e-03, 6.10219785e-03, 1.73635589e-04],
+#         10: [1.03597373e-03, 8.68107533e-03, 7.27703871e-03, 1.01829601e-03, 3.27493977e-04,
+#              1.20005946e-02, 7.99650907e-06, 1.46295412e-02, 3.05741087e-03, 3.80251672e-03],
+#         15: [1.42315616e-03, 1.05462090e-02, 1.09413407e-02, 2.57800959e-03, 5.62285734e-03,
+#              9.52050022e-03, 5.54054485e-03, 1.51984579e-02, 4.32610621e-04, 6.49570287e-03],
+#     },
+#     "BayesSum": {
+#         5: [3.41480972e-05, 2.25149492e-05, 1.45841488e-04, 2.51880068e-06, 8.49946952e-06,
+#             2.33356808e-05, 2.03995727e-06, 1.58398211e-05, 2.44664033e-06, 6.33773609e-05],
+#         10: [1.31345453e-04, 3.38322736e-04, 1.25630877e-04, 3.24524426e-04, 6.76157720e-05,
+#              4.16162600e-04, 1.43796280e-04, 6.14573156e-04, 6.02121570e-05, 7.82360206e-04],
+#         15: [9.08454434e-04, 2.15210888e-03, 2.86778805e-03, 3.52999969e-03, 2.13046158e-03,
+#              6.84320681e-04, 9.40602877e-04, 7.16832566e-05, 9.97242303e-04, 1.78999419e-03],
+#     },
+#     "Active BayesSum": {
+#         5: [2.20436918e-06, 2.04733721e-06, 3.91577211e-06, 3.53205905e-06, 6.34696651e-06,
+#             2.76420486e-06, 2.46079382e-06, 2.28937861e-07, 1.53039999e-05, 9.76466477e-06],
+#         10: [1.36588159e-04, 1.32593100e-04, 1.27642270e-04, 1.09296333e-04, 4.19209910e-05,
+#              1.36949995e-04, 6.82333574e-05, 1.05065468e-04, 1.97872117e-04, 2.08293830e-04],
+#         15: [2.15650487e-04, 3.96974087e-04, 1.80159348e-04, 6.57238145e-04, 8.68516740e-04,
+#              3.62030438e-04, 3.78704875e-04, 1.37290209e-04, 3.80317304e-04, 2.15475960e-06],
+#     },
+# }
+
+
+    plot_abs_error_boxplots(
+        rmses,
+        d_list,
+        methods=[label for _, label in methods],
+        save_path="potts_abs_error_boxplot.pdf",
+        logy=True,
+        showfliers=True
+    )
+
 # --------------------
 # Main
 # --------------------
-def main():
-    global beta
-    k_b = 1
-    T_c = 2.269
-    beta = 1/2.269
-    # lambda_ = 0.001
-    d = 15
-    q = 3
-    # n_vals = jnp.array([8, 48, 216, 1000]) 
-    n_vals = jnp.array([8, 28, 84, 220, 1000]) 
-    num_seeds = int(50)
-    sub_sample = 2000
+# def main():
+#     global beta
+#     k_b = 1
+#     T_c = 2.269
+#     beta = 1/2.269
+#     # lambda_ = 0.001
+#     d = 15
+#     q = 3
+#     # n_vals = jnp.array([8, 48, 216, 1000]) 
+#     n_vals = jnp.array([8, 28, 84, 220, 1000]) 
+#     num_seeds = int(50)
+#     sub_sample = 2000
 
     # key = jax.random.PRNGKey(0)
     # key, kh, kJ = jax.random.split(key, 3)
@@ -815,20 +1099,22 @@ def main():
     # for k, v in results.items():
     #     print(k, np.asarray(v["mean_abs_error"]))
 
-    # save_results_portable("potts_1.npz", n_vals, results)
-    n_vals, all_results = load_results_portable("potts_1.npz")
+    # save_results_portable("potts.npz", n_vals, results)
+    # n_vals, all_results = load_results_portable("potts.npz")
+    # all_results["BayesSum (IID)"] = all_results["BayesSum"]
     # print(all_results)
-    # plot_results(n_vals, all_results)
+    # plot_results(n_vals, all_results, False, "potts_abs_err_iid_vs_unique.pdf")
+    # plot_results(n_vals, all_results, True, "potts_abs_err.pdf")
 
-    methods = ["MC", "BayesSum", "Active BayesSum", "RR", "SS", "IS"]
+    # methods = ["MC", "BayesSum", "Active BayesSum", "RR", "SS", "IS"]
 
-    for m in methods:
-        alpha, a, b = estimate_alpha(n_vals, all_results[m]["mean_abs_error"], min_index=1)
-        print(f"{m}: α ≈ {alpha:.3f}")
+    # for m in methods:
+    #     alpha, a, b = estimate_alpha(n_vals, all_results[m]["mean_abs_error"], min_index=1)
+    #     print(f"{m}: α ≈ {alpha:.3f}")
 
     # # Ablation
 
-    # d_list = [10]
+    # d_list = [5, 10, 15]
     # methods = [("mc", "MC"), ("bq_random", "BayesSum"), ("bq_bo", "Active BayesSum")]
     # rmses = {label: {} for _, label in methods}
     # n_ablation = 400
@@ -918,6 +1204,37 @@ def main():
     #          mus=jnp.array(mus), vars=jnp.array(vars_))
     # print("potts_calibration.npz")
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--figure",
+        type=str,
+        default="uniform",
+        choices=[
+            "uniform",
+            "unique_vs_iid",
+            "slope",
+            "dim_boxplot",
+            "lambda_ablation",
+            "calibration",
+            "all",
+        ],
+        help="Which figure/results to generate.",
+    )
+    args = parser.parse_args()
+
+    if args.figure in ("uniform", "all"):
+        generate_uniform_abs_error()
+    if args.figure in ("unique_vs_iid", "all"):
+        generate_comparison_unique_vs_iid()
+    if args.figure in ("slope", "all"):
+        generate_slope_table()
+    if args.figure in ("dim_boxplot", "all"):
+        generate_dimension_boxplot()
+    if args.figure in ("lambda_ablation", "all"):
+        generate_lengthscale_ablation()
+    if args.figure in ("calibration", "all"):
+        generate_calibration()
+
 if __name__ == "__main__":
     main()
-
