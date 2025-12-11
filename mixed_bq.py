@@ -195,31 +195,38 @@ def bq_estimate_and_var(K, z, fvals, mu_kk):
 # ----------------------------
 # Designs, MC & RBQ helpers
 # ----------------------------
-def sample_levels(key, n, q):
+def sample_levels(key, n, q, unique):
     levels = jnp.linspace(-1.0, 1.0, q)
     k1, k2 = jax.random.split(key)
-    idx1 = jax.random.randint(k1, (n,), 0, q)
-    idx2 = jax.random.randint(k2, (n,), 0, q)
-    return levels[idx1], levels[idx2]  # (n,), (n,)
 
-def make_random_design(key, n, d, L, q):
+    if not unique:
+        idx1 = jax.random.randint(k1, (n,), 0, q)
+        idx2 = jax.random.randint(k2, (n,), 0, q)
+        return levels[idx1], levels[idx2]  # (n,), (n,)
+
+    total_combos = q * q
+    flat_indices = jax.random.choice(key, jnp.arange(total_combos), shape=(n,), replace=False)
+    idx1, idx2 = jnp.divmod(flat_indices, q)
+    return levels[idx1], levels[idx2]
+
+def make_random_design(key, n, d, L, q, unique):
     kx, kh = jax.random.split(key)
     X = jax.random.uniform(kx, (n, d), minval=-L, maxval=L)
-    h1, h2 = sample_levels(kh, n, q=q)
+    h1, h2 = sample_levels(kh, n, q, unique)
     H = jnp.stack([h1, h2], axis=1)  # (n,2)
     return X, H
 
-def mc_estimate_single(key, n, d, L, q):
-    X, H = make_random_design(key, n, d, L, q)
+def mc_estimate_single(key, n, d, L, q, unique):
+    X, H = make_random_design(key, n, d, L, q, unique)
     fvals = v_ackley_2C(X, H)
     return float(fvals.mean())
 
-def mc_estimate_repeated(base_key, n, d, L, q, reps, I_true):
+def mc_estimate_repeated(base_key, n, d, L, q, reps, I_true, unique):
     errs = []
     k = base_key
     for _ in range(reps):
         k, kk = jax.random.split(k)
-        Ihat = mc_estimate_single(kk, n, d, L, q)
+        Ihat = mc_estimate_single(kk, n, d, L, q, unique)
         if I_true is not None:
             errs.append(abs(Ihat - I_true))
         else:
@@ -231,20 +238,20 @@ def mc_estimate_repeated(base_key, n, d, L, q, reps, I_true):
         s = float(np.std(errs))
         return m, s, m
 
-def rbq_once(key, n, d, L, ell, kernel, lambda_c, q):
-    X, H = make_random_design(key, n, d, L, q)
+def rbq_once(key, n, d, L, ell, kernel, lambda_c, q, unique):
+    X, H = make_random_design(key, n, d, L, q, unique)
     fvals = v_ackley_2C(X, H)
     K, z = build_gram_and_z_box_2c(X, H, ell, L, kernel, lambda_c, q)
     mu_kk = mu_kk_2c(ell, L, d, kernel, lambda_c, q)
     I_hat, Var, _ = bq_estimate_and_var(K, z, fvals, mu_kk)
     return float(I_hat), float(jnp.sqrt(jnp.maximum(Var, 0.0)))
 
-def rbq_repeated(base_key, n, d, L, ell, kernel, lambda_c, reps, q, I_true):
+def rbq_repeated(base_key, n, d, L, ell, kernel, lambda_c, reps, q, I_true, unique):
     errs, sds = [], []
     k = base_key
     for _ in range(reps):
         k, kk = jax.random.split(k)
-        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel, lambda_c, q)
+        Ihat, sd = rbq_once(kk, n, d, L, ell, kernel, lambda_c, q, unique)
         if I_true is not None:
             errs.append(abs(Ihat - I_true))
         else:
@@ -253,13 +260,20 @@ def rbq_repeated(base_key, n, d, L, ell, kernel, lambda_c, reps, q, I_true):
     return float(np.mean(errs)), float(np.std(errs)), float(np.mean(sds)), float(I_true if I_true is not None else np.mean(errs))
 
 
-def plot_results(n_vals, all_results, save_path="results", filename="ackley2c_abs_err.pdf"):
+def plot_results(n_vals, all_results, filename, unique, save_path="results"):
     os.makedirs(save_path, exist_ok=True)
 
-    styles = {
-        "MC":         {"color": "k", "marker": "o", "label": "MC"},
-        "RBQ": {"color": "b", "marker": "s", "label": "BayesSum + BQ"},
-    }
+    if unique:
+        styles = {
+            "MC":         {"color": "k", "marker": "o", "label": "MC", 'linestyle': '-'},
+            "RBQ": {"color": "b", "marker": "s", "label": "BayesSum + BQ", 'linestyle': '-'},
+        }
+    else:
+        styles = {
+            "RBQ-IID":     {"color": "b", "marker": "^", "label": "BayesSum + BQ (IID)", 'linestyle': '--'},
+            "RBQ": {"color": "b", "marker": "s", "label": "BayesSum + BQ", 'linestyle': '-'},
+        }
+
 
     plt.figure(figsize=(10, 6))
     handles, labels = [], []
@@ -276,18 +290,19 @@ def plot_results(n_vals, all_results, save_path="results", filename="ackley2c_ab
         y_line = np.clip(mean_err, eps, None)
 
         st = styles[name]
-        (ln,) = plt.plot(n_vals, y_line, linestyle='-', color=st['color'],
+        (ln,) = plt.plot(n_vals, y_line, linestyle=st['linestyle'], color=st['color'],
                          marker=st['marker'], label=st['label'])
         plt.fill_between(n_vals, y_low, y_high, color=st['color'], alpha=0.15)
         handles.append(ln); labels.append(st['label'])
 
     plt.xlabel("Number of Points", fontsize=32)
     plt.ylabel("Absolute Error", fontsize=32)
-    # plt.title(title, fontsize=20)
+    if not unique:
+        plt.title("Mixed", fontsize=32)
     plt.yscale("log")
     plt.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.6)
     plt.tight_layout()
-    plt.legend(loc="best", fontsize=32)
+    # plt.legend(loc="upper right", fontsize=32, bbox_to_anchor=(1.045, 1.045))
     out_path = os.path.join(save_path, filename)
     plt.savefig(out_path, format="pdf")
     # plt.show()
@@ -315,13 +330,13 @@ def load_results(filename):
         all_results[method][field] = val[0] if field == "true_val" else val
     return n_vals, all_results
 
-def calibration(n_calibration, seeds, key_seed, ell, lambda_, d, L, q, I_true, kernel):
+def calibration(n_calibration, seeds, key_seed, ell, lambda_, d, L, q, I_true, kernel, bayes_sum = True):
     mus, stds = [], []
     key = jax.random.PRNGKey(key_seed)
 
     for s in range(seeds):
         key, subkey = jax.random.split(key)
-        mu, std = rbq_once(subkey, n_calibration, d, L, ell, kernel, lambda_, q)
+        mu, std = rbq_once(subkey, n_calibration, d, L, ell, kernel, lambda_, q, bayes_sum)
         mus.append(mu)
         stds.append(std)
 
@@ -346,65 +361,78 @@ if __name__ == "__main__":
     # settings
     d        = 1
     L        = 1.0
-    ell      = 0.8
+    ell      = 0.32
     q     = 17
     ns       = [20, 40, 60, 80, 100]
-    seeds  = 10
+    seeds  = 100
 
     kernel = "shared"
-    lambda_c = 1.0   
+    lambda_c = 0.1
 
-    I_true = ackley2c_truth_d1_exact(L)
-    print(f"Large-MC ground truth: I_true = {I_true:+.8f}")
+    # I_true = ackley2c_truth_d1_exact(L)
+    # print(f"Large-MC ground truth: I_true = {I_true:+.8f}")
 
-    err_mc_mean,    err_mc_std    = [], []
-    err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
+    # err_mc_mean,    err_mc_std    = [], []
+    # err_rbq_shr_m,  err_rbq_shr_s, sd_rbq_shr_m = [], [], []
+    # err_rbq_iid_m,  err_rbq_iid_s, sd_rbq_iid_m = [], [], []
 
-    for n in ns:
-        # BayesSum
-        m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, lambda_c, seeds, q, I_true)
-        err_rbq_shr_m.append(m_e_s)
-        err_rbq_shr_s.append(s_e_s)
-        sd_rbq_shr_m.append(m_sd_s)
+    # for n in ns:
+    #     # BayesSum - Unique samples
+    #     m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, lambda_c, seeds, q, I_true, True)
+    #     err_rbq_shr_m.append(m_e_s)
+    #     err_rbq_shr_s.append(s_e_s)
+    #     sd_rbq_shr_m.append(m_sd_s)
 
-        # MC baseline
-        mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true)
-        err_mc_mean.append(mc_mean_err)
-        err_mc_std.append(mc_std_err)
+    #     # BayesSum - IID samples
+    #     m_e_s, s_e_s, m_sd_s, _ = rbq_repeated(jax.random.PRNGKey(8000 + n), n, d, L, ell, kernel, lambda_c, seeds, q, I_true, False)
+    #     err_rbq_iid_m.append(m_e_s)
+    #     err_rbq_iid_s.append(s_e_s)
+    #     sd_rbq_iid_m.append(m_sd_s)
 
-        print(
-            f"n={n:3d} | "
-            f"RBQ_shared: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
-            f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
-        )
+    #     # MC baseline
+    #     mc_mean_err, mc_std_err, _ = mc_estimate_repeated(jax.random.PRNGKey(9000 + n), n, d, L, q, seeds, I_true, False)
+    #     err_mc_mean.append(mc_mean_err)
+    #     err_mc_std.append(mc_std_err)
 
-    all_results = {
-        "RBQ": {
-            "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
-            "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(seeds),
-        },
-        "MC": {
-            "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
-            "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(seeds),
-        },
-    }
+    #     print(
+    #         f"n={n:3d} | "
+    #         f"RBQ_shared: {m_e_s:.3e} ± {s_e_s:.3e} (mean SD={m_sd_s:.3e}) | "
+    #         f"MC: {mc_mean_err:.3e} ± {mc_std_err:.3e}"
+    #     )
 
-    save_results("mixed.npz", ns, all_results)
+    # all_results = {
+    #     "RBQ": {
+    #         "mean_abs_error": np.asarray(err_rbq_shr_m, dtype=float),
+    #         "se_abs_error":   np.asarray(err_rbq_shr_s, dtype=float) / np.sqrt(seeds),
+    #     },
+    #     "RBQ-IID": {
+    #         "mean_abs_error": np.asarray(err_rbq_iid_m, dtype=float),
+    #         "se_abs_error":   np.asarray(err_rbq_iid_s, dtype=float) / np.sqrt(seeds),
+    #     },
+    #     "MC": {
+    #         "mean_abs_error": np.asarray(err_mc_mean, dtype=float),
+    #         "se_abs_error":   np.asarray(err_mc_std, dtype=float) / np.sqrt(seeds),
+    #     },
+    # }
+
+    # save_results("mixed.npz", ns, all_results)
     n_vals, all_results = load_results("mixed.npz")
-    print(all_results)
-
-    plot_results(ns, all_results, save_path="results", filename="ackley2c_abs_err.pdf")
 
 
-    # Calibration
-    calibrations = {}
-    calibration_seeds = 50
-    n_calibration = 60
-    key_seed = 5
-    t_e, C_nom, emp_cov, mus, stds = calibration(n_calibration, calibration_seeds, key_seed, ell, lambda_c, d, L, q, I_true, "shared")
+    # plot_results(n_vals, all_results, "ackley2c_abs_error.pdf", True, save_path="results")
+    plot_results(n_vals, all_results, "ackley2c_unique_vs_iid.pdf", False, save_path="results")
 
-    jnp.savez("results/mixed_calibration_results.npz",
-             t_true=t_e, C_nom=jnp.array(C_nom),
-             emp_cov=jnp.array(emp_cov),
-             mus=jnp.array(mus), vars=jnp.array(stds))
-    print("mixed_calibration.npz")
+
+    # # Calibration
+    # calibrations = {}
+    # calibration_seeds = 50
+    # n_calibration = 60
+    # key_seed = 5
+    # t_e, C_nom, emp_cov, mus, stds = calibration(n_calibration, calibration_seeds, key_seed, ell, lambda_c, d, L, q, I_true, "shared")
+
+    # jnp.savez("results/mixed_calibration_results.npz",
+    #          t_true=t_e, C_nom=jnp.array(C_nom),
+    #          emp_cov=jnp.array(emp_cov),
+    #          mus=jnp.array(mus), vars=jnp.array(stds))
+    # print("mixed_calibration.npz")
+

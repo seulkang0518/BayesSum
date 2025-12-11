@@ -62,17 +62,17 @@ def cmp_suff_stats(sales_hist):
 # ================================================================
 def get_reference_nodes(seed, lam_ref, n_samples):
     key = jax.random.PRNGKey(seed)
-    # X = jax.random.poisson(key, lam=lam_ref, shape=(n_samples,))
-    oversample = n_samples * 5
-    X_proposed = random.poisson(key, lam=lam_ref, shape=(oversample,))
-    X_unique = jnp.unique(X_proposed)
+    X = jax.random.poisson(key, lam=lam_ref, shape=(n_samples,))
+    # oversample = n_samples * 5
+    # X_proposed = random.poisson(key, lam=lam_ref, shape=(oversample,))
+    # X_unique = jnp.unique(X_proposed)
 
-    while X_unique.shape[0] < n_samples / 2:
-        subkey, extra_key = random.split(key)
-        extra = random.poisson(extra_key, lam=lam_ref, shape=(oversample,))
-        X_unique = jnp.unique(jnp.concatenate([X_unique, extra]))
+    # while X_unique.shape[0] < n_samples / 2:
+    #     subkey, extra_key = random.split(key)
+    #     extra = random.poisson(extra_key, lam=lam_ref, shape=(oversample,))
+    #     X_unique = jnp.unique(jnp.concatenate([X_unique, extra]))
 
-    X = X_unique[:n_samples]
+    # X = X_unique[:n_samples]
     return jnp.sort(X.astype(jnp.float64))
 
 def poisson_ppf_jax(u, lam_ref, xmax=100):
@@ -170,13 +170,13 @@ def train_cmp(suffstats, X, w, lam_ref, lam_init, nu_init, use_bq, seed):
     traj = []
     traj.append(params)
 
-    for i in range(800):
+    for i in range(1000):
         loss, grads = loss_grad(params, suffstats, X, w, lam_ref, use_bq)
         updates, state = opt.update(grads, state)
         params = optax.apply_updates(params, updates)
         traj.append(params)
 
-        if i % 200 == 0:
+        if i % 50 == 0:
             print(f"[seed {seed:2d} | iter {i}] "
                   f"{'BQ' if use_bq else 'MC'} "
                   f"lam={float(params[0]):.4f}, nu={float(params[1]):.4f}, loss={float(loss):.4f}")
@@ -322,7 +322,7 @@ def make_loglik_grid(data, X_Z, w, lam_ref, eta_min=0.1, eta_max=3.0, nu_min=0.0
 # 5. PLOT EVERYTHING
 # -----------------------------------------------------------
 def plot_traj(ETA, NU, loglik_vals, traj_bq, traj_mc, eta_mle, nu_mle):
-    plt.figure(figsize=(9,7))
+    plt.figure(figsize=(9,5))
 
     # Heatmap background
     plt.contourf(ETA, NU, loglik_vals, levels=50, cmap="viridis")
@@ -338,8 +338,9 @@ def plot_traj(ETA, NU, loglik_vals, traj_bq, traj_mc, eta_mle, nu_mle):
     plt.scatter(eta_mle, nu_mle, s=160, c="yellow",
                 edgecolor="black", label="Optimum")
 
-    plt.xlabel(r"$\eta$", fontsize=32)
-    plt.ylabel(r"$\nu$", fontsize=32)
+    plt.xlabel(r"$\theta_1$", fontsize=32)
+    plt.ylabel(r"$\theta_2$", fontsize=32)
+    # plt.ylim(0.0, 0.6)
     plt.title("Optimisation Trajectories", fontsize=32)
     plt.legend(
         loc='upper right',   # change to 'lower left' / 'upper left' if overlapping data
@@ -366,120 +367,123 @@ if __name__ == "__main__":
     xmax = int(jnp.max(data)) + 20
     suffstats  = cmp_suff_stats(sales_hist)
 
-    lam_Z = empirical_mean(sales_hist)      
+    lam_Z = empirical_mean(sales_hist)  
+    # print(lam_Z)    
     lam_init = 1.2
     nu_init = 0.5
 
     num_seeds = 10
-    n_samples = 60
+    n_samples = 30
 
     mc_lam_list, mc_nu_list = [], []
     bq_lam_list, bq_nu_list = [], []
     traj_bq_list, traj_mc_list = [], []
     mc_time, bq_time = [], []
 
-    for seed in range(num_seeds):
+    # for seed in range(num_seeds):
 
-        # X_Z = get_reference_nodes(seed, lam_Z, n_samples)
-        X_Z = stratified_poisson_nodes(seed, lam_Z, n_samples)
-        # print(X_Z)
+    #     X_mc = get_reference_nodes(seed, lam_Z, n_samples)
+    #     X_bq = jnp.arange(10)
+    #     # X_Z = stratified_poisson_nodes(seed, lam_Z, n_samples)
+    #     # print(X_Z)
 
-        # ----------------------------------------------------------
-        # MC-IS training
-        # ----------------------------------------------------------
-        start_time = time.perf_counter()
-        lam_mc, nu_mc, traj_mc = train_cmp(
-            suffstats, X_Z, None, lam_Z,
-            lam_init, nu_init, use_bq=False, seed=seed)
-        elapsed = time.perf_counter() - start_time
+    #     # ----------------------------------------------------------
+    #     # MC-IS training
+    #     # ----------------------------------------------------------
+    #     start_time = time.perf_counter()
+    #     lam_mc, nu_mc, traj_mc = train_cmp(
+    #         suffstats, X_mc, None, lam_Z,
+    #         lam_init, nu_init, use_bq=False, seed=seed)
+    #     elapsed = time.perf_counter() - start_time
 
-        mc_lam_list.append(lam_mc)
-        mc_nu_list.append(nu_mc)
-        mc_time.append(elapsed)
-        # ----------------------------------------------------------
-        # BQ training
-        # ----------------------------------------------------------
-        start_time = time.perf_counter()
+    #     mc_lam_list.append(lam_mc)
+    #     mc_nu_list.append(nu_mc)
+    #     mc_time.append(elapsed)
+    #     # ----------------------------------------------------------
+    #     # BQ training
+    #     # ----------------------------------------------------------
+    #     if seed == 0:
+    #         start_time = time.perf_counter()
 
-        K = brownian_kernel(X_Z, X_Z) + 1e-6*jnp.eye(len(X_Z))
-        L, _ = cho_factor(K, lower=True)
+    #         K = brownian_kernel(X_bq, X_bq) + 1e-5*jnp.eye(len(X_bq))
+    #         L, _ = cho_factor(K, lower=True)
 
-        mu = compute_kme(lam_Z, X_Z, xmax=200).reshape(-1, 1)
-        w = cho_solve((L, True), mu).ravel()       
+    #         mu = compute_kme(lam_Z, X_bq, xmax=200).reshape(-1, 1)
+    #         w = cho_solve((L, True), mu).ravel()       
 
-        lam_bq, nu_bq, traj_bq = train_cmp(
-            suffstats, X_Z, w, lam_Z,
-            lam_init, nu_init, use_bq=True, seed=seed)
+    #         lam_bq, nu_bq, traj_bq = train_cmp(
+    #             suffstats, X_bq, w, lam_Z,
+    #             lam_init, nu_init, use_bq=True, seed=seed)
 
-        elapsed = time.perf_counter() - start_time
+    #         elapsed = time.perf_counter() - start_time
 
-        bq_lam_list.append(lam_bq)
-        bq_nu_list.append(nu_bq)
-        bq_time.append(elapsed)
+    #         bq_lam_list.append(lam_bq)
+    #         bq_nu_list.append(nu_bq)
+    #         bq_time.append(elapsed)
 
-        if seed == 0:
-            traj_mc_list = traj_mc
-            traj_bq_list = traj_bq
+    #     if seed == 0:
+    #         traj_mc_list = traj_mc
+    #         traj_bq_list = traj_bq
 
-    lam_mc = np.mean(mc_lam_list)
-    nu_mc = np.mean(mc_nu_list)
-    mc_time = np.mean(mc_time)
+    # lam_mc = np.mean(mc_lam_list)
+    # nu_mc = np.mean(mc_nu_list)
+    # mc_time = np.mean(mc_time)
 
-    lam_bq = np.mean(bq_lam_list)
-    nu_bq = np.mean(bq_nu_list)     
-    bq_time = np.mean(bq_time)
+    # lam_bq = np.mean(bq_lam_list)
+    # nu_bq = np.mean(bq_nu_list)     
+    # bq_time = np.mean(bq_time)
 
 
-    traj_bq_list = jnp.stack(traj_bq_list)
-    traj_mc_list = jnp.stack(traj_mc_list)
+    # traj_bq_list = jnp.stack(traj_bq_list)
+    # traj_mc_list = jnp.stack(traj_mc_list)
 
-    print("\n================ SUMMARY ================\n")
-    print("MC-IS mean:", lam_mc, nu_mc)
-    print("MC time   :", mc_time)
-    print("BQ mean   :", lam_bq, nu_bq)
-    print("BQ time   :", bq_time)
+    # print("\n================ SUMMARY ================\n")
+    # print("MC-IS mean:", lam_mc, nu_mc)
+    # print("MC time   :", mc_time)
+    # print("BQ mean   :", lam_bq, nu_bq)
+    # print("BQ time   :", bq_time)
 
-    np.savez(
-    "cmp_results.npz",
-    bq_lam_list=bq_lam_list,
-    bq_nu_list=bq_nu_list,
-    traj_bq_list = traj_bq_list,
-    mc_lam_list=mc_lam_list,
-    mc_nu_list=mc_nu_list,
-    traj_mc_list = traj_mc_list,
-    mc_time_list = mc_time,
-    bq_time_list = bq_time
-    )
+    # np.savez(
+    # "cmp_results_fixed.npz",
+    # bq_lam_list=bq_lam_list,
+    # bq_nu_list=bq_nu_list,
+    # traj_bq_list = traj_bq_list,
+    # mc_lam_list=mc_lam_list,
+    # mc_nu_list=mc_nu_list,
+    # traj_mc_list = traj_mc_list,
+    # mc_time_list = mc_time,
+    # bq_time_list = bq_time
+    # )
 
-    results = np.load("cmp_results.npz")
+    results = np.load("cmp_results_fixed.npz")
 
-    bq_lam_list = jnp.array(results["bq_lam_list"])
-    mc_lam_list = jnp.array(results["mc_lam_list"])
+    # bq_lam_list = jnp.array(results["bq_lam_list"])
+    # mc_lam_list = jnp.array(results["mc_lam_list"])
 
-    bq_nu_list = jnp.array(results["bq_nu_list"])
-    mc_nu_list = jnp.array(results["mc_nu_list"])
+    # bq_nu_list = jnp.array(results["bq_nu_list"])
+    # mc_nu_list = jnp.array(results["mc_nu_list"])
 
-    bq_lam_mean = np.mean(bq_lam_list)
-    bq_lam_se   = np.std(bq_lam_list) / jnp.sqrt(num_seeds)
+    # bq_lam_mean = np.mean(bq_lam_list)
+    # bq_lam_se   = np.std(bq_lam_list) / jnp.sqrt(num_seeds)
 
-    bq_nu_mean  = np.mean(bq_nu_list)
-    bq_nu_se    = np.std(bq_nu_list) / jnp.sqrt(num_seeds)
+    # bq_nu_mean  = np.mean(bq_nu_list)
+    # bq_nu_se    = np.std(bq_nu_list) / jnp.sqrt(num_seeds)
 
-    mc_lam_mean = np.mean(mc_lam_list)
-    mc_lam_se   = np.std(mc_lam_list) / jnp.sqrt(num_seeds)
+    # mc_lam_mean = np.mean(mc_lam_list)
+    # mc_lam_se   = np.std(mc_lam_list) / jnp.sqrt(num_seeds)
 
-    mc_nu_mean  = np.mean(mc_nu_list)
-    mc_nu_se    = np.std(mc_nu_list) / jnp.sqrt(num_seeds)
+    # mc_nu_mean  = np.mean(mc_nu_list)
+    # mc_nu_se    = np.std(mc_nu_list) / jnp.sqrt(num_seeds)
 
-    print("\n================ SUMMARY ================\n")
-    print("MC-IS mean:", mc_lam_mean, mc_nu_mean)
-    print("BQ mean   :", bq_lam_mean, bq_nu_mean)
-    plot_results_with_se(sales_hist, bq_nu_mean, bq_lam_mean, bq_nu_se, bq_lam_se, mc_nu_mean, mc_lam_mean, mc_nu_se, mc_lam_se, nu_init, lam_init)
+    # print("\n================ SUMMARY ================\n")
+    # print("MC-IS mean:", mc_lam_mean, mc_nu_mean)
+    # print("BQ mean   :", bq_lam_mean, bq_nu_mean)
+    # plot_results_with_se(sales_hist, bq_nu_mean, bq_lam_mean, bq_nu_se, bq_lam_se, mc_nu_mean, mc_lam_mean, mc_nu_se, mc_lam_se, nu_init, lam_init)
 
     traj_bq = jnp.array(results["traj_bq_list"])
     traj_mc = jnp.array(results["traj_mc_list"])
 
-    X_Z = stratified_poisson_nodes(0, lam_Z, n_samples)
+    X_Z = jnp.arange(10)
     K = brownian_kernel(X_Z, X_Z) + 1e-6*jnp.eye(len(X_Z))
     L, _ = cho_factor(K, lower=True)
 

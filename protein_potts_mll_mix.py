@@ -534,7 +534,7 @@ def plot_ksd_nll_vs_time_sorted(
     def _matrix_local(summary, n_list, method, metric):
         return np.array([summary[(method, int(n))][metric] for n in n_list], dtype=float)
 
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    fig, ax1 = plt.subplots(figsize=(10, 3))
     for meth in methods:
         if meth == "ISMC":
             n_list = n_list_mc
@@ -604,7 +604,7 @@ def plot_ksd_vs_n(
     def _matrix_local(summary, n_list, method, metric):
         return np.array([summary[(method, int(n))][metric] for n in n_list], dtype=float)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 3))
 
     for meth in methods:
         if meth == "ISMC":
@@ -658,46 +658,46 @@ if __name__ == "__main__":
     n_list_bq   = [50, 100, 120, 160, 200]
 
 
-    # Fixed evaluation set for KSD across ALL runs/seeds
-    _, X_eval_global = data_preprocess(p, q, L, 2000, seed=123)
-    lam_ksd_global = median_hamming_lambda(X_eval_global)
+    # # Fixed evaluation set for KSD across ALL runs/seeds
+    # _, X_eval_global = data_preprocess(p, q, L, 2000, seed=123)
+    # lam_ksd_global = median_hamming_lambda(X_eval_global)
 
-    seeds = list(range(30))  
+    # seeds = list(range(30))  
 
-    summary_ismc, summary_bq = run_many_separate(
-        n_list_ismc, n_list_bq, seeds,
-        L=L, q=q, p=p, n_gd=n_gd, beta=beta, lam=0.1104, ksd_lam=lam_ksd_global,
-        lr=lr, weight_decay=weight_decay, num_steps=num_steps,
-        n_mix_components=n_mix_components, X_eval_fixed=X_eval_global
-    )
-    save_summary_simple("ismc_results.npz", summary_ismc, n_list_ismc, method="ISMC")
-    save_summary_simple("bq_results.npz",   summary_bq,   n_list_bq,   method="BQ")
+    # summary_ismc, summary_bq = run_many_separate(
+    #     n_list_ismc, n_list_bq, seeds,
+    #     L=L, q=q, p=p, n_gd=n_gd, beta=beta, lam=0.1104, ksd_lam=0.1104,
+    #     lr=lr, weight_decay=weight_decay, num_steps=num_steps,
+    #     n_mix_components=n_mix_components, X_eval_fixed=X_eval_global
+    # )
+    # save_summary_simple("ismc_results.npz", summary_ismc, n_list_ismc, method="ISMC")
+    # save_summary_simple("bq_results.npz",   summary_bq,   n_list_bq,   method="BQ")
 
     summary_ismc, n_list_ismc_loaded, _ = load_summary_simple("ismc_results.npz")
     summary_bq,   n_list_bq_loaded,   _ = load_summary_simple("bq_results.npz")
 
 
-    # os.makedirs("results", exist_ok=True)
-    # plot_ksd_nll_vs_time_sorted(
-    #     n_list_bq=n_list_bq_loaded,
-    #     n_list_mc=n_list_ismc_loaded,
-    #     summary_bq=summary_bq,
-    #     summary_mc=summary_ismc,
-    #     methods=("ISMC","BQ"),
-    #     true_value=15.823802519792164,
-    #     save_path="results",
-    #     fname="Potts_ksd&NLL_vs_time_TIGHT.pdf",
-    #     ci_level=95,  # 68% default (shorter bars)
-    # )
+    os.makedirs("results", exist_ok=True)
+    plot_ksd_nll_vs_time_sorted(
+        n_list_bq=n_list_bq_loaded,
+        n_list_mc=n_list_ismc_loaded[1:],
+        summary_bq=summary_bq,
+        summary_mc=summary_ismc,
+        methods=("ISMC","BQ"),
+        true_value=15.823802519792164,
+        save_path="results",
+        fname="Potts_ksd&NLL_vs_time_TIGHT.pdf",
+        ci_level=95,  # 68% default (shorter bars)
+    )
 
-    # summary_ismc, n_list_ismc_loaded, _ = load_summary_simple("ismc_results_full.npz")
-    # plot_ksd_vs_n(
-	#     n_list_bq=n_list_bq_loaded,
-	#     n_list_mc=n_list_ismc_loaded,
-	#     summary_bq=summary_bq,
-	#     summary_mc=summary_ismc,
-	#     methods=("ISMC","BQ"),
-	#     save_path="results",
-	#     fname="Potts_ksd_vs_n_TIGHT.pdf",
-	#     ci_level=95
-	# )
+    summary_ismc, n_list_ismc_loaded, _ = load_summary_simple("ismc_results_full.npz")
+    plot_ksd_vs_n(
+	    n_list_bq=n_list_bq_loaded,
+	    n_list_mc=n_list_ismc_loaded,
+	    summary_bq=summary_bq,
+	    summary_mc=summary_ismc,
+	    methods=("ISMC","BQ"),
+	    save_path="results",
+	    fname="Potts_ksd_vs_n_TIGHT.pdf",
+	    ci_level=95
+	)
